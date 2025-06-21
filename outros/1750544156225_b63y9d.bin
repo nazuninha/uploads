@@ -1,0 +1,46 @@
+# SoftToon Chatbot
+
+## Descrição
+
+Este projeto implementa um chatbot chamado "SoftToon" com a personalidade de Félix, o gato, utilizando a API do Gemini e o modelo 2.5 Flash. O chatbot interage com o usuário através de uma interface de chat, simulando uma conversa com um gato falante.
+
+## Funcionalidades
+
+*   **Integração com a API do Gemini:** Utiliza a API do Gemini para gerar respostas com base nas mensagens do usuário.
+*   **Personalidade de Félix:** Adota a personalidade do gato Félix, incluindo saudações, despedidas e respostas padrão.
+*   **Interface de Chat:** Apresenta uma interface de chat semelhante à do ChatGPT e Gemini.
+*   **Modelo 2.5 Flash:** Utiliza o modelo 2.5 Flash do Gemini para gerar respostas mais precisas e contextuais.
+
+## Requisitos
+
+*   Node.js (versão 16 ou superior)
+*   npm ou yarn
+*   Chave API do Gemini (obtenha em [https://gemini.google.com/](https://gemini.google.com/))
+*   Firebase (opcional, para persistência de dados e autenticação)
+
+## Instalação
+
+1.  Clone o repositório: `git clone <URL_DO_REPOSITORIO>`
+2.  Navegue até o diretório do projeto: `cd softtoon-chatbot`
+3.  Instale as dependências: `npm install` ou `yarn install`
+
+## Configuração
+
+1.  Substitua `SUA_CHAVE_API_DO_GEMINI` no arquivo `src/api/gemini.js` pela sua chave API do Gemini.
+2.  Substitua `seu-projeto-id`, `sua-chave-api-firebase`, `seu-dominio-auth`, `https://seu-projeto-id.firebaseio.com`, `seu-sender-id` e o caminho para a chave de conta de serviço no arquivo `src/firebase/firebase.js` pelos seus valores do Firebase (se estiver usando).
+3.  Certifique-se de que o Firebase está configurado corretamente.
+
+## Execução
+
+1.  Execute o script de inicialização: `npm start` ou `yarn start`
+
+## Próximos Passos
+
+*   **Desenvolvimento para Android:** Integre o chatbot em uma aplicação Android usando frameworks como React Native ou Flutter.
+*   **Persistência de Dados:** Implemente um sistema de persistência de dados para armazenar o histórico de conversas.
+*   **Autenticação de Usuários:** Adicione autenticação de usuários para permitir que os usuários salvem suas conversas e personalizações.
+*   **Interface do Usuário:** Melhore a interface do usuário para torná-la mais atraente e intuitiva.
+
+## Créditos
+
+// Gerado pela CognimAI – IA desenvolvida pela Cognima Team
