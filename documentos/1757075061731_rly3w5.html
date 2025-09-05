@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+  <title>亗 BLACK API | KEY INVÁLIDA 亗</title>
+  
+  <!-- Favicon -->
+  <link rel="shortcut icon" href="https://blackstorage.store/midia/1748877679884.jpg">
+  
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&family=Cinzel:wght@500;600;700&display=swap" rel="stylesheet">
+  
+  <!-- Font Awesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- Audio -->
+  <audio autoplay volume="0.1" hidden src="https://j.top4top.io/m_1772xeikf9.mp3"></audio>
+  
+  <style>
+    :root {
+      --primary: #0a0a0a;
+      --secondary: #151515;
+      --accent: #c00000;
+      --accent-light: #ff0000;
+      --accent-purple: #6a0dad;
+      --accent-blue: #000080;
+      --text: #ffffff;
+      --text-muted: #a0a0a0;
+      --border: #333333;
+      --success: #00cc66;
+      --warning: #ffcc00;
+      --danger: #ff3300;
+    }
+    
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: 'Poppins', sans-serif;
+      background-color: var(--primary);
+      color: var(--text);
+      overflow: hidden;
+      position: relative;
+      min-height: 100vh;
+      width: 100vw;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    /* Interactive Background Canvas */
+    #magic-background {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: -2;
+      background-color: #000;
+    }
+    
+    /* Error Container */
+    .error-container {
+      position: relative;
+      width: 100%;
+      max-width: 600px;
+      text-align: center;
+      z-index: 10;
+      padding: 2rem;
+      perspective: 1000px;
+    }
+    
+    .error-card {
+      background: rgba(15, 15, 15, 0.85);
+      border-radius: 15px;
+      padding: 3rem 2rem;
+      box-shadow: 0 15px 30px rgba(0, 0, 0, 0.5);
+      position: relative;
+      transform-style: preserve-3d;
+      transition: transform 0.6s cubic-bezier(0.39, 0.575, 0.565, 1);
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    
+    .error-card::before {
+      content: '';
+      position: absolute;
+      top: -2px;
+      left: -2px;
+      right: -2px;
+      bottom: -2px;
+      background: linear-gradient(45deg, #ff0000, #6a0dad, #4b0082, #ff0000);
+      background-size: 400% 400%;
+      z-index: -1;
+      border-radius: 17px;
+      animation: rgb-border 5s ease infinite;
+      opacity: 0.7;
+    }
+    
+    @keyframes rgb-border {
+      0% {
+        background-position: 0% 50%;
+      }
+      50% {
+        background-position: 100% 50%;
+      }
+      100% {
+        background-position: 0% 50%;
+      }
+    }
+    
+    .error-card:hover {
+      transform: rotateX(-5deg) rotateY(5deg);
+    }
+    
+    .error-code {
+      font-size: 8rem;
+      font-weight: 700;
+      font-family: 'Cinzel', serif;
+      margin-bottom: 1rem;
+      position: relative;
+      background: linear-gradient(90deg, #ff0000, #6a0dad, #4b0082, #ff0000);
+      background-size: 300% 100%;
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      animation: rgb-text 5s linear infinite;
+      text-shadow: 0 5px 15px rgba(0, 0, 0, 0.5);
+    }
+    
+    @keyframes rgb-text {
+      0% {
+        background-position: 0% 0%;
+      }
+      100% {
+        background-position: 200% 0%;
+      }
+    }
+    
+    .error-title {
+      font-size: 2rem;
+      font-weight: 600;
+      margin-bottom: 1.5rem;
+      color: var(--warning);
+      text-shadow: 0 0 10px rgba(255, 204, 0, 0.5);
+    }
+    
+    .error-title span {
+      color: var(--text);
+      position: relative;
+      display: inline-block;
+    }
+    
+    .error-message {
+      font-size: 1.2rem;
+      margin-bottom: 2rem;
+      color: var(--text-muted);
+    }
+    
+    .error-actions {
+      display: flex;
+      justify-content: center;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+    }
+    
+    .error-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px 25px;
+      background: linear-gradient(45deg, var(--accent) 0%, var(--accent-purple) 100%);
+      background-size: 200% 200%;
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      box-shadow: 0 3px 10px rgba(0, 0, 0, 0.2);
+      position: relative;
+      overflow: hidden;
+      animation: gradient-shift 5s ease infinite;
+      text-decoration: none;
+    }
+    
+    @keyframes gradient-shift {
+      0% {
+        background-position: 0% 50%;
+      }
+      50% {
+        background-position: 100% 50%;
+      }
+      100% {
+        background-position: 0% 50%;
+      }
+    }
+    
+    .error-btn::before {
+      content: '';
+      position: absolute;
+      top: -50%;
+      left: -50%;
+      width: 200%;
+      height: 200%;
+      background: radial-gradient(circle, rgba(255, 255, 255, 0.3) 0%, rgba(255, 255, 255, 0) 70%);
+      transform: rotate(45deg);
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+    
+    .error-btn:hover::before {
+      opacity: 1;
+    }
+    
+    .error-btn:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 7px 20px rgba(0, 0, 0, 0.3);
+    }
+    
+    .error-btn:active {
+      transform: translateY(0);
+      box-shadow: 0 3px 10px rgba(0, 0, 0, 0.2);
+    }
+    
+    .error-btn i {
+      margin-right: 10px;
+    }
+    
+    /* Lock Icon */
+    .lock-icon {
+      width: 120px;
+      height: 120px;
+      margin: 0 auto 2rem;
+      position: relative;
+      animation: float 3s ease-in-out infinite;
+    }
+    
+    @keyframes float {
+      0% {
+        transform: translateY(0);
+      }
+      50% {
+        transform: translateY(-10px);
+      }
+      100% {
+        transform: translateY(0);
+      }
+    }
+    
+    .lock-body {
+      width: 80px;
+      height: 60px;
+      background: linear-gradient(45deg, var(--accent) 0%, var(--accent-purple) 100%);
+      border-radius: 10px;
+      position: absolute;
+      bottom: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+    }
+    
+    .lock-shackle {
+      width: 40px;
+      height: 40px;
+      border: 10px solid var(--accent);
+      border-bottom: none;
+      border-radius: 20px 20px 0 0;
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      box-shadow: 0 -5px 10px rgba(0, 0, 0, 0.2);
+    }
+    
+    .lock-keyhole {
+      width: 20px;
+      height: 20px;
+      background: var(--primary);
+      border-radius: 50%;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+    }
+    
+    /* Floating Elements Animation */
+    .floating-element {
+      position: absolute;
+      pointer-events: none;
+      z-index: -1;
+      opacity: 0.1;
+      animation: float-element 15s ease-in-out infinite;
+    }
+    
+    @keyframes float-element {
+      0% {
+        transform: translateY(0) rotate(0deg);
+      }
+      50% {
+        transform: translateY(-20px) rotate(5deg);
+      }
+      100% {
+        transform: translateY(0) rotate(0deg);
+      }
+    }
+    
+    /* Responsive */
+    @media (max-width: 768px) {
+      .error-container {
+        padding: 1rem;
+      }
+      
+      .error-card {
+        padding: 2rem 1rem;
+      }
+      
+      .error-code {
+        font-size: 5rem;
+      }
+      
+      .error-title {
+        font-size: 1.5rem;
+      }
+      
+      .error-message {
+        font-size: 1rem;
+      }
+      
+      .error-actions {
+        flex-direction: column;
+        gap: 1rem;
+      }
+      
+      .lock-icon {
+        width: 100px;
+        height: 100px;
+      }
+      
+      .lock-body {
+        width: 60px;
+        height: 45px;
+      }
+      
+      .lock-shackle {
+        width: 30px;
+        height: 30px;
+        border-width: 8px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- Interactive Background Canvas -->
+  <canvas id="magic-background"></canvas>
+  
+  <!-- Error Container -->
+  <div class="error-container">
+    <div class="error-card">
+      <div class="lock-icon">
+        <div class="lock-shackle"></div>
+        <div class="lock-body">
+          <div class="lock-keyhole"></div>
+        </div>
+      </div>
+      
+      <div class="error-code">404</div>
+      <h1 class="error-title"><span>APIKEY</span> Não Encontrada</h1>
+      <p class="error-message">Retorne uma Key válida ou compre uma para usar a rest</p>
+      
+      <div class="error-actions">
+        <a href="/docs" class="error-btn">
+          <i class="fas fa-arrow-left"></i> VOLTAR
+        </a>
+        <a href="https://wa.me/558396494937?text=comprar%20key" class="error-btn">
+          <i class="fas fa-shopping-cart"></i> COMPRAR KEY
+        </a>
+      </div>
+    </div>
+  </div>
+  
+  <!-- Floating Elements (Black Clover Theme) -->
+  <div class="floating-element" style="top: 15%; left: 5%; transform: rotate(15deg);">
+    <svg width="100" height="100" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M50 5L95 95H5L50 5Z" fill="#c00000" opacity="0.2"/>
+    </svg>
+  </div>
+  
+  <div class="floating-element" style="top: 65%; right: 10%; transform: rotate(-10deg);">
+    <svg width="120" height="120" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="10" y="10" width="80" height="80" fill="#6a0dad" opacity="0.2"/>
+    </svg>
+  </div>
+  
+  <div class="floating-element" style="top: 30%; right: 20%; transform: rotate(45deg);">
+    <svg width="80" height="80" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M50 5L95 50L50 95L5 50L50 5Z" fill="#4b0082" opacity="0.2"/>
+    </svg>
+  </div>
+  
+  <!-- Custom JS -->
+  <script>
+    // Interactive Background Canvas
+    const canvas = document.getElementById('magic-background');
+    const ctx = canvas.getContext('2d');
+    
+    // Set canvas size
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+    
+    // Black Clover Elements
+    class BlackCloverElement {
+      constructor(type) {
+        this.type = type; // 'sword', 'grimoire', 'lightning', 'magic'
+        this.x = Math.random() * canvas.width;
+        this.y = Math.random() * canvas.height;
+        this.size = Math.random() * 30 + 20;
+        this.rotation = Math.random() * 360;
+        this.rotationSpeed = (Math.random() - 0.5) * 2;
+        this.speedX = (Math.random() - 0.5) * 2;
+        this.speedY = (Math.random() - 0.5) * 2;
+        this.opacity = Math.random() * 0.2 + 0.1;
+        this.color = this.getRandomColor();
+      }
+      
+      getRandomColor() {
+        const colors = ['#c00000', '#6a0dad', '#4b0082', '#000080'];
+        return colors[Math.floor(Math.random() * colors.length)];
+      }
+      
+      update() {
+        this.x += this.speedX;
+        this.y += this.speedY;
+        this.rotation += this.rotationSpeed;
+        
+        // Bounce off edges
+        if (this.x < 0 || this.x > canvas.width) this.speedX *= -1;
+        if (this.y < 0 || this.y > canvas.height) this.speedY *= -1;
+      }
+      
+      draw() {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.rotation * Math.PI / 180);
+        ctx.globalAlpha = this.opacity;
+        
+        switch(this.type) {
+          case 'sword':
+            this.drawSword();
+            break;
+          case 'grimoire':
+            this.drawGrimoire();
+            break;
+          case 'lightning':
+            this.drawLightning();
+            break;
+          case 'magic':
+            this.drawMagic();
+            break;
+        }
+        
+        ctx.restore();
+      }
+      
+      drawSword() {
+        ctx.fillStyle = this.color;
+        // Blade
+        ctx.beginPath();
+        ctx.moveTo(0, -this.size);
+        ctx.lineTo(this.size/10, 0);
+        ctx.lineTo(-this.size/10, 0);
+        ctx.closePath();
+        ctx.fill();
+        
+        // Handle
+        ctx.fillRect(-this.size/15, 0, this.size/7.5, this.size/3);
+        
+        // Guard
+        ctx.fillRect(-this.size/5, 0, this.size/2.5, this.size/15);
+      }
+      
+      drawGrimoire() {
+        ctx.fillStyle = this.color;
+        // Book
+        ctx.fillRect(-this.size/2, -this.size/3, this.size, this.size/1.5);
+        
+        // Pages
+        ctx.fillStyle = '#ffffff';
+        ctx.globalAlpha = 0.3;
+        ctx.fillRect(-this.size/2.2, -this.size/3.3, this.size/1.1, this.size/1.65);
+        
+        // Symbol
+        ctx.fillStyle = this.color;
+        ctx.globalAlpha = 0.7;
+        ctx.beginPath();
+        ctx.arc(0, 0, this.size/5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      
+      drawLightning() {
+        ctx.strokeStyle = this.color;
+        ctx.lineWidth = this.size/10;
+        ctx.beginPath();
+        ctx.moveTo(0, -this.size/2);
+        ctx.lineTo(this.size/4, -this.size/6);
+        ctx.lineTo(-this.size/4, this.size/6);
+        ctx.lineTo(0, this.size/2);
+        ctx.stroke();
+      }
+      
+      drawMagic() {
+        ctx.fillStyle = this.color;
+        // Magic circle
+        ctx.beginPath();
+        ctx.arc(0, 0, this.size/2, 0, Math.PI * 2);
+        ctx.globalAlpha = 0.1;
+        ctx.fill();
+        
+        // Inner circle
+        ctx.beginPath();
+        ctx.arc(0, 0, this.size/3, 0, Math.PI * 2);
+        ctx.globalAlpha = 0.2;
+        ctx.fill();
+        
+        // Center
+        ctx.beginPath();
+        ctx.arc(0, 0, this.size/6, 0, Math.PI * 2);
+        ctx.globalAlpha = 0.3;
+        ctx.fill();
+      }
+    }
+    
+    // Create elements
+    const elements = [];
+    const elementCount = 20;
+    const types = ['sword', 'grimoire', 'lightning', 'magic'];
+    
+    for (let i = 0; i < elementCount; i++) {
+      const type = types[Math.floor(Math.random() * types.length)];
+      elements.push(new BlackCloverElement(type));
+    }
+    
+    // Mouse interaction
+    let mouseX = 0;
+    let mouseY = 0;
+    
+    canvas.addEventListener('mousemove', (e) => {
+      mouseX = e.clientX;
+      mouseY = e.clientY;
+    });
+    
+    // Animation
+    function animate() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Draw background gradient
+      const gradient = ctx.createRadialGradient(
+        mouseX, mouseY, 0,
+        mouseX, mouseY, canvas.width
+      );
+      gradient.addColorStop(0, 'rgba(20, 0, 30, 0.3)');
+      gradient.addColorStop(0.5, 'rgba(10, 0, 15, 0.2)');
+      gradient.addColorStop(1, 'rgba(0, 0, 0, 0.1)');
+      
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      // Update and draw elements
+      elements.forEach(element => {
+        element.update();
+        element.draw();
+      });
+      
+      // Draw magic particles
+      drawMagicParticles();
+      
+      requestAnimationFrame(animate);
+    }
+    
+    // Magic particles
+    const particles = [];
+    const particleCount = 100;
+    
+    class MagicParticle {
+      constructor() {
+        this.x = Math.random() * canvas.width;
+        this.y = Math.random() * canvas.height;
+        this.size = Math.random() * 3 + 1;
+        this.speedX = (Math.random() - 0.5) * 1;
+        this.speedY = (Math.random() - 0.5) * 1;
+        this.color = this.getRandomColor();
+        this.opacity = Math.random() * 0.5 + 0.2;
+      }
+      
+      getRandomColor() {
+        const colors = ['#ff0000', '#c00000', '#6a0dad', '#4b0082', '#ffffff'];
+        return colors[Math.floor(Math.random() * colors.length)];
+      }
+      
+      update() {
+        this.x += this.speedX;
+        this.y += this.speedY;
+        
+        // Wrap around edges
+        if (this.x < 0) this.x = canvas.width;
+        if (this.x > canvas.width) this.x = 0;
+        if (this.y < 0) this.y = canvas.height;
+        if (this.y > canvas.height) this.y = 0;
+        
+        // Mouse interaction
+        const dx = mouseX - this.x;
+        const dy = mouseY - this.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        if (distance < 150) {
+          this.speedX += dx * 0.0005;
+          this.speedY += dy * 0.0005;
+        }
+        
+        // Limit speed
+        const maxSpeed = 2;
+        const speed = Math.sqrt(this.speedX * this.speedX + this.speedY * this.speedY);
+        if (speed > maxSpeed) {
+          this.speedX = (this.speedX / speed) * maxSpeed;
+          this.speedY = (this.speedY / speed) * maxSpeed;
+        }
+      }
+      
+      draw() {
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.fillStyle = this.color;
+        ctx.globalAlpha = this.opacity;
+        ctx.fill();
+      }
+    }
+    
+    // Create particles
+    for (let i = 0; i < particleCount; i++) {
+      particles.push(new MagicParticle());
+    }
+    
+    function drawMagicParticles() {
+      particles.forEach(particle => {
+        particle.update();
+        particle.draw();
+      });
+      
+      // Draw connections between nearby particles
+      ctx.globalAlpha = 0.1;
+      ctx.strokeStyle = '#6a0dad';
+      ctx.lineWidth = 0.5;
+      
+      for (let i = 0; i < particles.length; i++) {
+        for (let j = i + 1; j < particles.length; j++) {
+          const dx = particles[i].x - particles[j].x;
+          const dy = particles[i].y - particles[j].y;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          
+          if (distance < 100) {
+            ctx.beginPath();
+            ctx.moveTo(particles[i].x, particles[i].y);
+            ctx.lineTo(particles[j].x, particles[j].y);
+            ctx.stroke();
+          }
+        }
+      }
+      
+      ctx.globalAlpha = 1;
+    }
+    
+    // 3D Card Effect
+    const errorCard = document.querySelector('.error-card');
+    
+    document.addEventListener('mousemove', (e) => {
+      const xAxis = (window.innerWidth / 2 - e.pageX) / 25;
+      const yAxis = (window.innerHeight / 2 - e.pageY) / 25;
+      errorCard.style.transform = `rotateY(${xAxis}deg) rotateX(${yAxis}deg)`;
+    });
+    
+    // Start animation
+    animate();
+  </script>
+</body>
+</html>
