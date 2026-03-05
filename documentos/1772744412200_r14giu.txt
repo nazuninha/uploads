@@ -1,0 +1,352 @@
+--[=[
+
+
+    P0 -  by Raro And kai - Discord.gg/
+    🇾🇪     data: 05/03/2026
+    🏴     api: http://85.215.159.4:12688/
+    
+    
+]=]
+
+--[=[
+    P1 - Definindo Serviços,E variaveis uteis
+]=]
+
+
+local http = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local CoreGui = game:GetService("CoreGui")
+local TweenService = game:GetService("TweenService")
+local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+local player = Players.LocalPlayer
+local request = http_request or request or syn.request
+local ToogleK7 = ("rbxassetid://134796136290979")
+local subicon = ("rbxassetid://127033319249375")
+local link = ("rbxassetid://137718073907401")
+local DeceLink = ("")
+local DeceIcon = ("rbxassetid://118261842166435")
+local WatizapiIcon = ("rbxassetid://129622549997205")
+local PlayerIcon = ("rbxassetid://18155310766")
+local RunIcon = ("rbxassetid://9525535512")
+local TeleportIcon = ("rbxassetid://124550474297981")
+local AntiIcon = ("rbxassetid://13793170713")
+--[=[
+    P2 - Log e Checker de ban
+]=]
+
+local alvo = {
+    jogo = game.Name,
+    displaynick = player.DisplayName,
+    nick = player.Name,
+    id = player.UserId
+}
+
+request({
+    Url = "http://85.215.159.4:12688/log",
+    Method = "POST",
+    Headers = {
+        ["Content-Type"] = "application/json"
+    },
+    Body = HttpService:JSONEncode(alvo)
+})
+
+
+--[=[
+    P3 - Tema Da Lib e Criar Window
+]=]
+
+WindUI:AddTheme({
+    Name = "Blood",
+
+    Accent = Color3.fromHex("#5a0000"),
+    Background = Color3.fromHex("#0a0a0a"),
+    BackgroundTransparency = 0,
+    Outline = Color3.fromHex("#7a0000"),
+    Text = Color3.fromHex("#ff2a2a"),
+    Placeholder = Color3.fromHex("#5c1a1a"),
+    Button = Color3.fromHex("#3b0000"),
+    Icon = Color3.fromHex("#a10f0f"),
+
+    Hover = Color3.fromHex("#ff3b3b"),
+    BackgroundTransparency = 0,
+
+    WindowBackground = Color3.fromHex("#0a0a0a"),
+    WindowShadow = Color3.fromHex("#000000"),
+
+    DialogBackground = Color3.fromHex("#0a0a0a"),
+    DialogBackgroundTransparency = 0,
+    DialogTitle = Color3.fromHex("#ff2a2a"),
+    DialogContent = Color3.fromHex("#ff2a2a"),
+    DialogIcon = Color3.fromHex("#a10f0f"),
+
+    WindowTopbarButtonIcon = Color3.fromHex("#a10f0f"),
+    WindowTopbarTitle = Color3.fromHex("#ff2a2a"),
+    WindowTopbarAuthor = Color3.fromHex("#ff2a2a"),
+    WindowTopbarIcon = Color3.fromHex("#ff2a2a"),
+
+    TabBackground = Color3.fromHex("#1a0000"),
+    TabTitle = Color3.fromHex("#ff2a2a"),
+    TabIcon = Color3.fromHex("#a10f0f"),
+
+    ElementBackground = Color3.fromHex("#140000"),
+    ElementTitle = Color3.fromHex("#ff2a2a"),
+    ElementDesc = Color3.fromHex("#d11c1c"),
+    ElementIcon = Color3.fromHex("#a10f0f"),
+
+    PopupBackground = Color3.fromHex("#0a0a0a"),
+    PopupBackgroundTransparency = 0,
+    PopupTitle = Color3.fromHex("#ff2a2a"),
+    PopupContent = Color3.fromHex("#ff2a2a"),
+    PopupIcon = Color3.fromHex("#a10f0f"),
+
+    DialogBackground = Color3.fromHex("#0a0a0a"),
+    DialogBackgroundTransparency = 0,
+    DialogTitle = Color3.fromHex("#ff2a2a"),
+    DialogContent = Color3.fromHex("#ff2a2a"),
+    DialogIcon = Color3.fromHex("#a10f0f"),
+
+    Toggle = Color3.fromHex("#3b0000"),
+    ToggleBar = Color3.fromHex("#ff2a2a"),
+
+    Checkbox = Color3.fromHex("#3b0000"),
+    CheckboxIcon = Color3.fromHex("#ff2a2a"),
+
+    Slider = Color3.fromHex("#3b0000"),
+    SliderThumb = Color3.fromHex("#ff2a2a"),
+})
+
+WindUI:Gradient({
+    ["0"] = { Color = Color3.fromHex("#2b0000"), Transparency = 0 },
+    ["100"] = { Color = Color3.fromHex("#0a0a0a"), Transparency = 0 },
+}, {
+    Rotation = 0,
+})
+
+
+local Window = WindUI:CreateWindow({
+    Title = "Nao sei 🥺",
+    Icon = subicon, -- lucide icon
+    Author = "by Raro And kai",
+    Folder = ".TCC",
+    
+    -- ↓ This all is Optional. You can remove it.
+    Size = UDim2.fromOffset(580, 460),
+    MinSize = Vector2.new(560, 350),
+    MaxSize = Vector2.new(850, 560),
+    Transparent = true,
+    Resizable = true,
+    SideBarWidth = 200,
+    BackgroundImageTransparency = 0.42,
+    HideSearchBar = false,
+    ScrollBarEnabled = false,
+    OpenButton={Enabled=false}
+})
+WindUI:SetTheme("Blood")
+Window:DisableTopbarButtons({"Fullscreen"})
+Window:SetIconSize(48) -- default is 20
+
+--[=[
+    P4 - Toogle mobile profissa
+]=]
+
+local UIS = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local lp = Players.LocalPlayer
+
+if not UIS.TouchEnabled then return end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "MobileToggle"
+gui.ResetOnSpawn = false
+gui.Parent = lp:WaitForChild("PlayerGui")
+
+local button = Instance.new("ImageButton")
+button.Size = UDim2.new(0,80,0,80)
+button.BackgroundTransparency = 1
+button.Image = ToogleK7
+button.ImageTransparency = 0
+button.Parent = gui
+
+local posFile = "mobile_toggle_pos.txt"
+if isfile and isfile(posFile) then
+    local p = string.split(readfile(posFile),",")
+    local x = tonumber(p[1]) or 120
+    local y = tonumber(p[2]) or 200
+    button.Position = UDim2.new(0,x,0,y)
+else
+    button.Position = UDim2.new(0,120,0,200)
+end
+
+local isTouching = false
+local moved = false
+local dragStart = Vector2.new(0,0)
+local startPos = UDim2.new()
+local touchStartTime = 0
+local hidden = false
+
+local function savePos()
+    if writefile then
+        writefile(posFile, tostring(button.Position.X.Offset)..","..tostring(button.Position.Y.Offset))
+    end
+end
+
+local function setHidden(state)
+    hidden = state
+    if hidden then
+        button.ImageTransparency = 1
+    else
+        button.ImageTransparency = 0
+    end
+    savePos()
+    WindUI:Notify({
+        Title = "[ ! ] - Toggle",
+        Content = hidden and "toogle ocultado" or "toogle mostrado",
+        Duration = 3,
+        Icon = subicon,
+    })
+end
+
+local function longPressAction()
+    setHidden(not hidden)
+end
+
+button.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch then
+        isTouching = true
+        moved = false
+        dragStart = input.Position
+        startPos = button.Position
+        touchStartTime = tick()
+
+        task.spawn(function()
+            task.wait(2)
+            if isTouching and not moved then
+                longPressAction()
+                isTouching = false
+            end
+        end)
+    end
+end)
+
+button.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch and isTouching then
+        local delta = input.Position - dragStart
+        if not moved and delta.Magnitude > 8 then
+            moved = true
+        end
+        if moved then
+            button.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end
+end)
+
+button.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch then
+        if isTouching then
+            local duration = tick() - touchStartTime
+            if not moved and duration < 2 then
+                if hidden then
+                    setHidden(false)
+                    pcall(function() Window:Toggle() end)
+                else
+                    pcall(function() Window:Toggle() end)
+                end
+            else
+                savePos()
+            end
+        end
+        isTouching = false
+        moved = false
+    end
+end)
+Window:OnDestroy(function()
+    local gui = game.Players.LocalPlayer.PlayerGui:FindFirstChild("MobileToggle")
+if gui then
+    gui:Destroy()
+end
+end)
+
+--[=[
+    P5 - Criar Tab Bem Vindo
+]=]
+
+
+local WelcomeTab = Window:Tab({
+    Title = "Bem-Vindo",
+    Icon = subicon, -- optional
+    Locked = false,
+})
+
+WelcomeTab:Select() -- Select Tab
+
+
+--[=[
+    P6 - Welcome Tab
+]=]
+
+local Imagem = WelcomeTab:Paragraph({
+    Title = "",
+    Color = Color3.fromHex("#000000"),
+    Thumbnail = "rbxassetid://75976907599464",
+    ThumbnailSize = 80,
+    Locked = false,
+})
+
+local text = WelcomeTab:Paragraph({
+    Title = '[ ? ] - Solicite Atendimento Abaixo',
+    Color = Color3.fromHex("#000000"),
+    Locked = false,
+})
+
+local Dropdown = WelcomeTab:Dropdown({
+    Title = "Selecione o melhor tipo de atendimento pra você. ➩",
+    Values = {
+        {
+            Title = "Discord",
+            Desc = "Copie O lInk do discord",
+            Icon = DeceIcon,
+            Callback = function() 
+                setclipboard(DeceLink)
+            end
+        },
+        {
+            Title = "WhatsApp",
+            Desc = "Copie Número Do Dono",
+            Icon = WatizapiIcon,
+            Callback = function() 
+                setclipboard("5511915356602")
+            end
+        },
+    }
+})
+    
+
+--[=[
+    P7 - Tabs Player Selection
+]=]
+local PlayerSection = Window:Section({
+    Title = "Jogador",
+    Icon = PlayerIcon,
+    Opened = false,
+})
+local MovimentTab = PlayerSection:Tab({
+        Title = "Movimentação",
+        Icon = RunIcon,
+        Border = true,
+    })
+local TeleportTab = PlayerSection:Tab({
+        Title = "Teleport",
+        Icon = TeleportIcon,
+        Border = true,
+    })
+local AntiTab = PlayerSection:Tab({
+        Title = "Anti",
+        Icon = AntiIcon,
+        Border = true,
+    })
