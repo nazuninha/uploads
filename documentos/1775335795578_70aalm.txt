@@ -1,0 +1,739 @@
+# Continuidade.md — Guia Completo para Desenvolvimento Futuro
+## Kaius Bot (baseado em ElyraBot) — v30
+
+> **Objetivo:** Permitir que qualquer IA ou desenvolvedor continue o projeto sem quebrar o sistema existente.
+> Este documento reflete o código **real** atual. Nada aqui é inventado ou genérico.
+
+---
+
+## 1. VISÃO GERAL DO PROJETO
+
+### O que o bot faz
+
+O Kaius é um **bot de WhatsApp** completo com:
+- Resposta a comandos com prefixo configurável (padrão `!`, configurável via `.env`)
+- Sistema de automações (gatilho → resposta, com suporte a mídia)
+- IA conversacional via Groq API (llama-3.3-70b-versatile) e Gemini
+- Detector de código JS no chat — instala comandos automaticamente
+- Sistema de XP passivo por mensagem em grupos
+- RPG, jogos, media (figurinhas, imagens, vídeos)
+- Gerenciamento de grupos (anti-link, anti-spam, bem-vindo, anti-fake)
+- Agendador de mensagens por horário
+- Webhooks externos (Event Streamer)
+- Dashboard web em tempo real (Express + Socket.io + PWA)
+- Integração com GitHub (push/pull do bot)
+- Sistema de sub-donos, VIPs e permissões granulares
+
+### Stack tecnológica
+
+| Tecnologia | Uso |
+|---|---|
+| Node.js (ES Modules) | Runtime — todos os arquivos usam `import/export`, NÃO `require` |
+| `@whiskeysockets/baileys` | Client WhatsApp (protocolo WA Web) |
+| Express + Socket.io | Dashboard web em tempo real |
+| JSON puro (classe `JsonDB`) | Banco de dados — arquivos `.json` na pasta `data/` |
+| Groq SDK | IA primária (llama-3.3-70b-versatile) |
+| axios | HTTP calls (IA Gemini, APIs de comandos) |
+| pino | Logger silencioso do Baileys |
+
+### Conceito principal
+
+O sistema é **100% modular**:
+1. Você cria um arquivo `.js` em `src/commands/CATEGORIA/`
+2. O loader carrega automaticamente — sem tocar em handler.js
+3. O mesmo arquivo pode exportar **comandos** E **hooks** simultaneamente
+
+---
+
+## 2. ARQUITETURA DO SISTEMA
+
+### Estrutura de arquivos
+
+```
+index.js                    ← Entry point. Conecta ao WhatsApp, wira tudo.
+src/
+  handler.js                ← CÉREBRO. Processa TODA mensagem recebida.
+  loader.js                 ← Carrega comandos e hooks de src/commands/
+  hooks.js                  ← Sistema de hooks/eventos
+  config.js                 ← CONFIG proxy (DB + ENV)
+  database.js               ← Classe JsonDB + instâncias singleton
+  permissions.js            ← Roles, getRole, isDono, isSubdono...
+  dashboard.js              ← API REST + Socket.io (painel web)
+  ai.js                     ← handleAIResponse (Groq)
+  codeDetector.js           ← Detecta JS no chat e instala como comando
+  github.js                 ← Push/pull seguro (sem stash)
+  scheduler.js              ← Agendador de mensagens
+  cleaner.js                ← Limpeza de cache a cada 12h
+  logger.js                 ← Logs coloridos no terminal + emit para dashboard
+  env.js                    ← Carrega .env ANTES de tudo (DEVE ser 1º import)
+  manus.js                  ← Agente IA autônomo (Groq tool-calling)
+  contributions.js          ← Sistema de contribuições de comandos
+  errorTracker.js           ← Captura erros e notifica o dono no WhatsApp
+  permissions.js            ← Roles e permissões
+  utils.js                  ← Helpers (getMessageText, getMentionedJids...)
+  commands/
+    admin/                  ← Comandos de moderação de grupo
+    core/                   ← Comandos essenciais (menu, ping, ia, info)
+    fun/                    ← Entretenimento, jogos, XP
+    info/                   ← Informações externas (clima, wiki, etc)
+    media/                  ← Figurinhas, imagens, vídeos
+    owner/                  ← Comandos do dono (hooks, anti-spam, etc)
+    rpg/                    ← Sistema de RPG
+public/
+  index.html                ← Dashboard (SPA, 2400+ linhas)
+  sw.js                     ← Service Worker PWA
+  manifest.json             ← PWA manifest
+  offline.html              ← Página offline
+data/                       ← Criada automaticamente. JSON files do DB.
+auth/                       ← Sessão do Baileys (NÃO versionar)
+```
+
+### Fluxo completo de uma mensagem
+
+```
+WhatsApp → Baileys
+    ↓ sock.ev.on('messages.upsert')
+    ↓ index.js → handleMessage(sock, msg)
+
+handler.js:
+1.  Checa msg.message (ignora mensagens de sistema)
+2.  Checa isGroupAllowed(from) via permissions.js
+3.  Extrai: from, isGrupo, texto, prefixo(p), userId, usuario
+4.  Auto-Resposta IA (auto_ia rules configuradas no painel)
+5.  Handler de botões interativos (nativeFlow, buttonsResponse)
+6.  Ignora mensagens vazias
+7.  Mensagens próprias (isMe): só processa se começa com prefixo
+8.  Checa bannedGroupsDB.has(from) → return se banido
+9.  Checa whitelist groupRestriction + allowedGroupsDB
+10. XP passivo (fire-and-forget, não bloqueia)
+11. Tracking de usuário (fire-and-forget, não bloqueia)
+12. Checa isBanido(userId) → responde msgBanido e return
+13. Anti-link do grupo (groupsDB.get(from).antilink)
+14. checkSpam(userId)
+15. ENGINE DE AUTOMAÇÕES (trigger → resposta, com tipo de mídia)
+16. Intercepta respostas do dono no privado (1/2/3 e sim/não)
+17. Detector de código JS (isLikelyCode + processCodeInChat)
+18. ← HOOKS CORREM AQUI → runHooks(hookCtx)
+    Se algum hook retornar true: return (para tudo)
+19. Checa prefixo → se não começa com p, return
+20. Checa bot pausado (configDB.botPaused) — só dono/subdono passa
+21. Parse: textoNorm → cmdNome, args, argStr
+22. getCommand(cmdNome) → busca por nome exato
+23. fuzzyMatch (Levenshtein) se fuzzyCommands !== false
+24. Se !cmd → envia msgCmdNaoEncontrado se configurado
+25. isCommandEnabled(cmd.name) → checa override no configDB
+26. groupMetadata (cache 30s por grupo)
+27. Permissões: cmdPermsDB override > canUseCommand por categoria
+28. checkCooldown → VIP/Subdono/Dono sempre passam
+29. Monta ctx completo
+30. cmd.execute(ctx)
+31. try/catch → errorTracker.capturar + notifyOwner
+```
+
+### Por que `env.js` DEVE ser o primeiro import em index.js
+
+```js
+import './src/env.js'  // ← SEMPRE PRIMEIRO
+```
+
+`env.js` chama `dotenv.config()` para carregar o `.env`. Se qualquer outro módulo importar antes (como `config.js`), as variáveis de ambiente **não estarão disponíveis** e o CONFIG lerá strings vazias.
+
+---
+
+## 3. SISTEMA DE COMANDOS
+
+### Estrutura de um comando
+
+```js
+export default {
+  name: 'ping',           // OBRIGATÓRIO. Único. Sem espaços. Lowercase.
+  aliases: ['p', 'test'], // Opcional. Array de strings.
+  description: 'Testa o bot', // Exibido no menu e no dashboard
+  category: 'core',       // Pasta onde fica. Define permissão padrão.
+  usage: '.ping',         // Exibido no menu
+  cooldown: 5,            // Segundos. 0 = sem cooldown.
+  enabled: true,          // Opcional. false = desativado por padrão.
+  async execute(ctx) {
+    await ctx.reply('Pong! 🏓')
+  }
+}
+```
+
+### Objeto `ctx` — tudo disponível dentro de `execute`
+
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `sock` | object | Client Baileys completo. Acesso total ao WhatsApp. |
+| `msg` | object | Mensagem Baileys crua (`msg.key`, `msg.message`, etc) |
+| `from` | string | JID do chat. Ex: `120363...@g.us` (grupo) ou `5511...@s.whatsapp.net` (privado) |
+| `userId` | string | JID de quem enviou. Em grupo usa `msg.key.participant`. |
+| `usuario` | string | `msg.pushName` ou nome do bot se `isMe` |
+| `isGrupo` | boolean | `from.endsWith('@g.us')` |
+| `nomeGrupo` | string\|null | Nome do grupo (cache 30s). Null em privado. |
+| `membros` | array | `groupMetadata.participants`. Pode estar vazio antes do cache. |
+| `args` | string[] | Palavras após o comando. `.ping olá mundo` → `['olá','mundo']` |
+| `argStr` | string | `args.join(' ')` — string completa dos argumentos |
+| `texto` | string | Texto completo da mensagem (inclui prefixo e comando) |
+| `prefix` | string | Prefixo efetivo usado (`.`, `>>`, `$`) |
+| `isAdmin` | boolean | Usuário é admin do grupo atual |
+| `isOwner` | boolean | `getRole(userId) === ROLES.DONO` |
+| `isSubdono` | boolean | `hasPermission(userId, ROLES.SUBDONO)` — true para dono também |
+| `userRole` | number | Role numérico: 1=Dono, 2=Subdono, 3=Admin, 4=VIP, 5=Usuário |
+| `botJid` | string | JID do próprio bot |
+| `gdata` | object | `groupsDB.get(from, {})` — dados do grupo (antilink, bemvindo, etc) |
+| `reply(text)` | function | Responde citando a mensagem original |
+| `sendText(text)` | function | Envia sem citar |
+| `sendImage(url, caption)` | function | Envia imagem com URL |
+| `sendSticker(buffer)` | function | Envia sticker |
+| `sendAudio(url)` | function | Envia mp3 (NÃO ptt) |
+| `react(emoji)` | function | Reage à mensagem |
+| `mention(jids, text)` | function | Envia com menção |
+
+### Categorias e permissões padrão
+
+| Categoria | Pasta | Acesso padrão |
+|---|---|---|
+| `core` | `commands/core/` | Todos |
+| `fun` | `commands/fun/` | Todos |
+| `games` | `commands/fun/` | Todos (mesma pasta que fun) |
+| `info` | `commands/info/` | Todos |
+| `media` | `commands/media/` | Todos |
+| `rpg` | `commands/rpg/` | Todos |
+| `admin` | `commands/admin/` | Admin do grupo + Subdono + Dono |
+| `owner` | `commands/owner/` | Só Dono e Subdono |
+| `misc` | `commands/misc/` | Todos (se existir) |
+
+> **ATENÇÃO:** A permissão padrão é definida por `canUseCommand()` em `handler.js`, que olha `cmd.category`. Mas pode ser **sobrescrita por comando** via `cmdPermsDB` (configurado no painel).
+
+### Múltiplos comandos no mesmo arquivo
+
+```js
+export const cmd1 = { name: 'cmd1', ... }
+export const cmd2 = { name: 'cmd2', ... }
+
+// OBRIGATÓRIO: export default array
+export default [cmd1, cmd2]
+```
+
+O loader faz: `const cmds = Array.isArray(mod.default) ? mod.default : [mod.default]`
+
+### Cooldown
+
+- Armazenado em `cooldownDB` com chave `"NUMERO:cmdname"`
+- VIP, Sub-dono e Dono **nunca têm cooldown** (ver `checkCooldown`)
+- Cooldown pode ser editado pelo painel (salvo em `cmdMetaDB`, aplicado pelo loader)
+
+---
+
+## 4. SISTEMA DE HOOKS (CRÍTICO)
+
+### O que é um hook
+
+Um hook é uma função que **intercepta mensagens antes dos comandos serem processados**. Diferente de um comando, ele não é ativado por prefixo — ele ouve **toda mensagem** (ou mensagens que passem em seus filtros).
+
+### Diferença fundamental entre hook e comando
+
+| Aspecto | Comando | Hook |
+|---|---|---|
+| Ativação | Prefixo + nome (`.ping`) | Toda mensagem (com filtros opcionais) |
+| Pode bloquear fluxo | Não | Sim — retornar `true` para o fluxo |
+| Acesso ao ctx | Completo | Parcial (sem `isAdmin`, `gdata`, etc) |
+| Registrado em | `commandMap` via loader | `_hooks` via `registerHook()` |
+| Persiste entre reloads | Sim (arquivo existe) | Sim (se declarado em arquivo) |
+
+### Posição dos hooks no fluxo
+
+Os hooks correm em `handler.js` na **posição 18** do fluxo descrito acima — DEPOIS das automações e do detector de código, mas ANTES da verificação de prefixo. Isso significa:
+
+- Um hook VÊ **todas as mensagens** (incluindo as sem prefixo)
+- Um hook pode **bloquear o processamento** de um comando se retornar `true`
+- Um hook NÃO tem acesso a `isAdmin`, `nomeGrupo` completo ou `gdata` (esses só são resolvidos depois, na fase de execução de comando)
+
+### ctx disponível para hooks
+
+```js
+{
+  sock, msg, from, userId, usuario, texto, isGrupo,
+  nomeGrupo,   // pode ser null (não foi buscado ainda)
+  membros,     // pode ser [] (não foi buscado ainda)
+  p,           // prefixo atual
+  args,        // texto.split(' ').slice(1)
+  reply(text, opts),   // envia citando
+  react(emoji),        // reage
+  sendText(jid, text), // envia para qualquer JID
+  mention(jid, text),  // menciona
+}
+```
+
+### Opções de filtro do hook
+
+```js
+registerHook({
+  id:           'meu-hook',     // OBRIGATÓRIO. String única.
+  name:         'Nome legível', // Para logs e painel
+  priority:     10,             // Menor = roda ANTES. Padrão: 50.
+  onlyGroups:   true,           // true = ignora privado
+  onlyPrivate:  false,          // true = ignora grupos (não combine com onlyGroups)
+  groups:       ['120363xxx@g.us'], // [] = todos. JIDs específicos = só nesses grupos.
+  match:        'palavra',      // String: ctx.texto.includes(). RegExp: .test()
+  filter:       (ctx) => ctx.userId !== '...', // Filtro avançado customizado
+  handle:       async (ctx) => {
+    // Lógica aqui
+    return true   // Para propagação (comando não roda)
+    // ou
+    return        // undefined = continua (próximos hooks e comandos rodam)
+  }
+})
+```
+
+### Formas de registrar um hook
+
+**Modo 1 — Declarativo (recomendado):** Exporte `hooks` do arquivo de comando.
+```js
+// src/commands/owner/meu_arquivo.js
+export const hooks = [
+  {
+    id: 'meu-hook',
+    name: 'Meu hook',
+    handle: async (ctx) => { ... }
+  }
+]
+export default [] // ou seus comandos
+```
+O loader chama `loadHooksFromModule(mod, fp)` automaticamente para cada arquivo.
+
+**Modo 2 — Programático:** Chame `registerHook()` de qualquer lugar, inclusive dentro de `execute()`.
+```js
+import { registerHook } from '../../hooks.js'
+// dentro de execute:
+registerHook({ id: `hook-${from}`, handle: async (ctx) => { ... } })
+```
+
+**Modo 3 — onEvent:** Para eventos que não são mensagens (GROUP_JOIN, CONNECT, etc).
+```js
+import { onEvent, EVENTS } from '../../hooks.js'
+onEvent(EVENTS.GROUP_JOIN, 'bemvindo-unico', async ({ jid, groupJid, sock }) => { ... })
+```
+
+### ⚠️ Riscos críticos dos hooks
+
+1. **Retornar `true` sem querer bloqueia TODOS os comandos.** Se um hook global (sem filtros) retornar `true` em alguma condição inesperada, nenhum comando roda.
+
+2. **Hooks sem `id` único criam duplicatas.** Cada `loadCommands()` re-registra os hooks. Se o ID for o mesmo, substitui (OK). Se IDs dinâmicos dependerem de variáveis mutáveis, podem criar múltiplos.
+
+3. **Priority 0 corre antes de TUDO.** Use prioridades baixas (5-15) só para moderação crítica como anti-spam.
+
+4. **Hooks não têm `isAdmin`.** Se precisar checar admin dentro de um hook, precisa chamar `isGroupAdmin(sock, from, userId)` manualmente — é uma chamada ao WhatsApp, pode ser lenta.
+
+5. **`match: 'string'` é case-insensitive, mas `match: /regex/` não é** — adicione flag `i` se precisar: `/palavra/i`.
+
+---
+
+## 5. SISTEMA DE EVENTOS
+
+### Eventos disponíveis (definidos em `hooks.js`)
+
+```js
+export const EVENTS = {
+  MESSAGE:    'message',     // Toda mensagem — ctx completo do hookCtx
+  COMMAND:    'command',     // Após executar: { cmd: 'nome', ctx }
+  GROUP_JOIN: 'group.join',  // { jid, groupJid, sock }
+  GROUP_LEAVE:'group.leave', // { jid, groupJid, sock }
+  CONNECT:    'bot.connect', // { jid }
+  DISCONNECT: 'bot.disconnect', // {}
+  RELOAD:     'cmd.reload',  // {} (não implementado ainda no emit)
+}
+```
+
+### Como usar `onEvent`
+
+```js
+import { onEvent, offEvent, EVENTS } from '../../hooks.js'
+
+// Registra — roda quando alguém entra em qualquer grupo
+onEvent(EVENTS.GROUP_JOIN, 'id-unico', async ({ jid, groupJid, sock }) => {
+  await sock.sendMessage(groupJid, {
+    text: `Bem-vindo @${jid.split('@')[0]}!`,
+    mentions: [jid]
+  })
+})
+
+// Para remover:
+offEvent(EVENTS.GROUP_JOIN, 'id-unico')
+```
+
+### Onde `emitEvent` é chamado
+
+| Evento | Chamado de |
+|---|---|
+| `EVENTS.MESSAGE` | `hooks.js → runHooks()` — toda vez que hooks rodam |
+| `EVENTS.COMMAND` | `handler.js` após `cmd.execute(ctx)` (via import dinâmico) |
+| `EVENTS.GROUP_JOIN` | `index.js → group-participants.update` quando `action === 'add'` |
+| `EVENTS.GROUP_LEAVE` | `index.js → group-participants.update` quando `action === 'remove'` |
+| `EVENTS.CONNECT` | `index.js → connection.update` quando `connection === 'open'` |
+| `EVENTS.DISCONNECT` | `index.js → connection.update` quando `connection === 'close'` |
+
+### Quando usar evento vs hook
+
+| Use evento quando... | Use hook quando... |
+|---|---|
+| Quer reagir a GROUP_JOIN/LEAVE/CONNECT | Quer interceptar mensagens |
+| Não precisa bloquear o fluxo | Precisa bloquear (retornar `true`) |
+| Ação não depende do texto | Ação depende do texto/conteúdo |
+| Quer saber que um comando foi executado | Quer rodar ANTES dos comandos |
+
+---
+
+## 6. BANCO DE DADOS
+
+### Classe `JsonDB`
+
+Cada instância representa um arquivo `data/NOME.json`. A classe tem debounce de 2s — gravações rápidas em sequência são agrupadas em uma única escrita.
+
+```js
+const db = new JsonDB('minha-colecao')
+db.set('chave', { valor: 123 })  // seta e agenda save (2s)
+db.get('chave', defaultValue)     // lê da memória (imediato)
+db.has('chave')                   // boolean
+db.delete('chave')                // deleta e agenda save
+db.all()                          // retorna cópia de todos os dados
+db.flush()                        // salva imediatamente (para shutdown)
+db.update('chave', { parcial })   // merge parcial
+```
+
+### Instâncias singleton exportadas
+
+| Variável | Arquivo | Uso |
+|---|---|---|
+| `configDB` | `config.json` | Configurações do bot (via CONFIG proxy) |
+| `groupsDB` | `groups.json` | Dados por grupo: antilink, bemvindo, etc |
+| `statsDB` | `stats.json` | Estatísticas: msgs, comandos por dia |
+| `usersDB` | `users.json` | Dados de usuários (tracking) |
+| `cooldownDB` | `cooldowns.json` | Cooldowns: chave `"NUM:cmdname"` |
+| `minionsDB` | `minions.json` | Todos os usuários que interagiram |
+| `subdonsDB` | `subdons.json` | Sub-donos e VIPs: chave = número limpo |
+| `cmdPermsDB` | `cmdperms.json` | Permissões por comando (override do painel) |
+| `menuTargetDB` | `menutargets.json` | Qual menu cada comando aparece |
+| `automationsDB` | `automations.json` | Automações + webhooks + auto_ia |
+| `allowedGroupsDB` | `allowedgroups.json` | Whitelist de grupos |
+| `bannedGroupsDB` | `bannedgroups.json` | Blacklist de grupos |
+| `schedulerDB` | `scheduler.json` | Tarefas agendadas |
+| `rpgDB` | `rpg.json` | Dados do RPG |
+| `contribDB` | `contributions.json` | Contribuições de comandos |
+
+### ⚠️ Problema duplo de `bannedGroupsDB`
+
+Existe uma instância em `database.js` (`bannedGroupsDB = new JsonDB('bannedgroups')`) e outra criada separadamente em `permissions.js` (`new JsonDB('banned_groups')` — nome diferente!). O handler importa de `database.js`. As duas NÃO compartilham os mesmos dados. Isso é um bug potencial.
+
+### CONFIG proxy
+
+`CONFIG` não é um objeto normal — é um `Proxy` que:
+- **GET:** Para chaves em `ENV_ONLY_KEYS`, lê sempre de `DEFAULTS` (que lê do env). Para o resto, lê de `configDB`.
+- **SET:** Escreve em `configDB` (e consequentemente no arquivo `data/config.json`).
+
+```js
+CONFIG.nome = 'Novo Nome'  // salva em data/config.json
+CONFIG.groqKey             // SEMPRE lê de process.env.GROQ_API_KEY (não do DB)
+```
+
+**`ENV_ONLY_KEYS`** (nunca salvos no DB):
+`dashboardPort, dashboardPass, dashboardAI, groqKey, geminiKey, aiProvider, owner, prefixo, autoUpdate, autoUpload, selfBot, github.repo, antiSpam, autoCodeDetect, codeOwnerOnly, fuzzyCommands`
+
+---
+
+## 7. COMO EXECUTAR O PROJETO
+
+### Dependências do sistema
+
+- **Node.js ≥ 18** (ES Modules nativos)
+- **npm** (ou yarn)
+- **ffmpeg** — para conversão de áudio (mp3 → opus para automações de áudio)
+- **git** — para push/pull GitHub (opcional)
+- No Termux: `pkg install nodejs ffmpeg git`
+
+### Setup inicial
+
+```bash
+# 1. Instalar dependências
+npm install
+
+# 2. Configurar .env (obrigatório antes de iniciar)
+cp .env.example .env
+# Editar: OWNER_NUMBER, BOT_NAME, GROQ_API_KEY, PREFIX, DASHBOARD_PORT
+
+# 3. Iniciar
+npm start
+# ou com PM2 (recomendado no Termux):
+pm2 start index.js --name kaius && pm2 save
+```
+
+### Variáveis de ambiente críticas (`.env`)
+
+```env
+OWNER_NUMBER=5511999999999   # número do dono SEM @s.whatsapp.net
+BOT_NAME=Kaius
+PREFIX=.
+GROQ_API_KEY=gsk_...
+DASHBOARD_PORT=3000
+DASHBOARD_PASS=               # senha do painel (vazio = sem senha)
+GEMINI_API_KEY=AIza...         # opcional, para Gemini como provider de IA
+GITHUB_REPO_WITH_TOKEN=https://TOKEN@github.com/usuario/repo
+AUTO_UPDATE=false
+SELF_BOT=false
+```
+
+### Conexão do bot
+
+Na primeira execução, o bot pedirá para conectar via Pairing Code:
+1. Acesse o painel em `http://SEU-IP:3000`
+2. Vá na aba **Conectar**
+3. Informe o número e clique em **Gerar Código**
+4. No WhatsApp: Aparelhos Conectados → Conectar → Código de 8 dígitos
+
+A sessão fica em `auth/` — **não deletar sem querer**, ou terá que parear de novo.
+
+---
+
+## 8. ESTADO ATUAL DO PROJETO
+
+### O que funciona bem
+
+- **Sistema de comandos:** carregamento, aliases, permissões, cooldown, fuzzy matching — tudo robusto
+- **Automações:** trigger com regex/contains/exato, múltiplos tipos de mídia, variáveis no texto
+- **Hooks:** sistema declarativo funcional, filtros por grupo específico, priority, match
+- **Dashboard:** 19 abas, todas com endpoints funcionais, Socket.io em tempo real
+- **Banco de dados:** JsonDB com debounce, flush no shutdown
+- **GitHub:** pull sem stash (sem corrupção), backup de `.env` antes do hard reset
+- **XP:** persistente em `data/xp.json`, level up com notificação
+- **PWA:** Service Worker com cache-first, offline page, banner discreto
+- **Detector de código:** identifica JS no chat e instala como comando automaticamente
+
+### O que parece incompleto
+
+- `EVENTS.RELOAD` definido em `hooks.js` mas `emitEvent(EVENTS.RELOAD, ...)` nunca é chamado
+- `permissions.js` cria um segundo `bannedGroupsDB` com arquivo diferente (`banned_groups.json`) — conflito latente
+- `src/utils/equipment.js` existe mas não foi analisado — pode ser órfão
+- `index.js` linha 100: `const gid` usado no `emitEvent(GROUP_JOIN)` mas não está definido nesse escopo (bug: usa `id` do evento, `gid` deveria ser `id`)
+- A aba "Arquivos" do dashboard tem `loadFiles('')` em `window.addEventListener('load')` removido para carregar só quando ativa, mas o LOADERS mapping foi adicionado — funciona parcialmente
+- Auto-IA (`auto_ia` rules) no handler usa `userId` antes de ser declarado na linha onde aparece (depende da ordem de execução real)
+
+### Pontos frágeis conhecidos
+
+1. **Cache de groupMetadata:** TTL de 30s pode servir dados desatualizados de admin. Se alguém foi promovido a admin há menos de 30s, o bot pode negar o comando.
+
+2. **Import dinâmico de xp.js no handler:** `import('./commands/fun/xp.js').then(...)` é fire-and-forget. Se `xp.js` tiver erro de sintaxe, falha silenciosamente.
+
+3. **spamMap em memória:** O anti-spam usa `new Map()` em memória. Reiniciando o bot, o mapa é zerado e o spam "some".
+
+4. **`CONFIG.prefixosGrupo`:** Permite prefixo diferente por grupo. Se configurado de forma errada, o bot pode parar de responder em grupos específicos.
+
+---
+
+## 9. PROBLEMAS E RISCOS
+
+### Bugs identificados
+
+| Bug | Localização | Impacto |
+|---|---|---|
+| `gid` não definido no GROUP_JOIN event | `index.js` linha ~100 | emitEvent recebe `groupJid: undefined` |
+| Dois `bannedGroupsDB` com nomes diferentes | `database.js` vs `permissions.js` | Bans via painel podem não funcionar via `isGroupAllowed()` |
+| Auto-IA usa `userId` antes da declaração no handler | `handler.js` ~linha 100 | Pode dar ReferenceError em versões strict |
+| `loadHooksFromModule` re-registra a cada `loadCommands` | `loader.js` | Hooks com `onEvent` dentro do arquivo disparam 2x ao recarregar |
+
+### Partes sensíveis — mexer com cuidado
+
+- **`src/handler.js`:** O núcleo. Qualquer mudança na ordem dos blocos pode quebrar o comportamento. Testar muito antes de alterar.
+- **`src/loader.js`:** Qualquer bug aqui faz o bot não carregar comandos nenhum.
+- **`src/config.js` (`ENV_ONLY_KEYS`):** Se tirar `prefixo` dessa lista, o prefixo do `.env` para de funcionar e o painel sobrescreve.
+- **Hooks globais (sem filtro):** Um hook com `priority: 1` e sem filtros que retorne `true` quebra o bot inteiro.
+- **`import` circular:** `config.js` importa de `database.js`. `database.js` NÃO importa nada do projeto. Não quebre isso.
+
+---
+
+## 10. REGRAS PARA FUTURAS IAs — EXTREMAMENTE IMPORTANTE
+
+### Regras absolutas
+
+1. **NÃO reescreva `handler.js` inteiro.** Modifique cirurgicamente. Cada bloco tem sua razão de existir na posição que está.
+
+2. **NÃO mude a estrutura de comandos** (`name, aliases, category, execute`). O loader, o dashboard e o menu dependem dessas propriedades.
+
+3. **NÃO mude a assinatura de `execute(ctx)`** — quebraria todos os comandos existentes.
+
+4. **NÃO adicione `import` em `env.js`** — ele deve ser o menor e mais simples possível.
+
+5. **NÃO mova arquivos entre pastas de comandos** sem considerar que a categoria define a permissão padrão.
+
+6. **NÃO crie hooks globais sem filtro** que retornem `true` — vai quebrar todos os comandos.
+
+7. **NÃO altere `ENV_ONLY_KEYS` em config.js** sem entender as implicações. Tirar `prefixo` da lista faria o painel sobrescrever o `.env`.
+
+8. **NÃO use `require()` em nenhum arquivo** — o projeto usa ES Modules (`import/export`) e dá erro com `require`.
+
+9. **NÃO esqueça de `export default`** ao criar um arquivo de comando — o loader quebra sem isso.
+
+10. **SEMPRE verifique `node --check arquivo.js`** antes de salvar um arquivo JS.
+
+### Regras de boas práticas
+
+- Ao adicionar campo novo ao `CONFIG`, adicione em `DEFAULTS` e decida se é `ENV_ONLY` ou não.
+- Ao criar nova instância de `JsonDB` em `database.js`, também exporte ela.
+- Ao adicionar endpoint `/api/algo` no dashboard, adicione na mesma ordem lógica (agrupado por função).
+- Hooks que dependem de estado externo (DB, variável de módulo) DEVEM ter um ID único baseado em algo estável (não em `Date.now()`).
+
+---
+
+## 11. COMO MODIFICAR COM SEGURANÇA
+
+### Adicionar um novo comando
+
+```bash
+# 1. Crie o arquivo na pasta da categoria correta
+# src/commands/fun/meucmd.js
+```
+
+```js
+export default {
+  name: 'meucmd',
+  aliases: ['mc'],
+  description: 'Descrição curta',
+  category: 'fun',
+  usage: '.meucmd <arg>',
+  cooldown: 5,
+  async execute({ reply, argStr, usuario }) {
+    if (!argStr) return reply('Informe um argumento!')
+    await reply(`${usuario} disse: ${argStr}`)
+  }
+}
+```
+
+```bash
+# 2. No WhatsApp: .reload
+# 3. Teste: .meucmd teste
+# 4. Não precisa tocar em nenhum outro arquivo.
+```
+
+### Adicionar um hook sem quebrar tudo
+
+```js
+// src/commands/owner/meu_hook.js
+export const hooks = [{
+  id:         'nome-unico-do-hook',   // USE UM ID REALMENTE ÚNICO
+  name:       'Nome Legível',
+  priority:   30,                      // NÃO use 1-5 sem necessidade
+  onlyGroups: true,                    // SEMPRE use filtros quando possível
+  groups:     [],                      // [] = todos os grupos. Use JIDs para restringir.
+  match:      null,                    // null = toda mensagem passa o filtro de texto
+  handle: async (ctx) => {
+    // SÓ retorne true se realmente quer BLOQUEAR o comando
+    if (ctx.texto.includes('palavra-especifica')) {
+      await ctx.reply('Detectei!')
+      return true   // ← bloqueia. Se não quer bloquear, não retorne nada.
+    }
+    // Sem return = undefined = fluxo continua normalmente
+  }
+}]
+
+export default [] // arquivo sem comandos
+```
+
+```bash
+# Recarregar hooks: .reload no WhatsApp
+# Verificar: .hooks (lista hooks ativos)
+# Remover se der problema: .hookoff nome-unico-do-hook
+```
+
+### Debugar um erro
+
+1. **Veja os logs no terminal** — todos os erros são logados com `logError`/`logWarn`
+2. **Abra o painel → aba Logs** — logs ao vivo com filtro por tipo
+3. **Use `node --check src/commands/PASTA/ARQUIVO.js`** para checar syntax
+4. **Erro "Cannot access X before initialization":** Temporal Dead Zone — variável declarada com `let` e usada antes na mesma função
+5. **Erro "is not a function":** Provavelmente um export default que não é objeto/função
+6. **Bot parou de responder em grupos:** Checar `groupRestriction` no configDB e `bannedGroupsDB`
+7. **Comando não carrega:** Ver log de `loadCommands` — procurar `Erro ao carregar ARQUIVO`
+
+---
+
+## 12. OBJETIVO FUTURO DO PROJETO
+
+Com base no código atual:
+
+- **Expansão de comandos de IA:** O `manus.js` (agente com tool-calling) está integrado mas subutilizado. Potencial para comandos que planejam e executam tarefas complexas automaticamente.
+
+- **Sistema de plugins remotos:** O endpoint `/api/plugins/install` (via URL) já existe. Criar um registry público de plugins seria natural.
+
+- **Notificações push:** O Service Worker já tem handler para `push` events. Integrar com Web Push API para notificações no celular quando o bot recebe mensagem importante.
+
+- **Background sync:** Já registrado no SW. Implementar fila de mensagens pendentes quando o servidor cai.
+
+- **Mais integrações externas:** A aba Integrações foi criada com Send API e Broadcast. Natural expandir com n8n, Make.com, Zapier via webhooks bidirecionais.
+
+- **Dashboard mobile-first:** O PWA está funcional. Próximo passo é otimizar o layout das abas para telas pequenas.
+
+- **Sistema de RPG expandido:** `rpg.js` existe mas é simples. Base para batalhas, inventário, crafting.
+
+---
+
+## 13. CHECKLIST OBRIGATÓRIO PARA OUTRA IA
+
+Antes de fazer QUALQUER modificação, responda:
+
+- [ ] Entendi o fluxo completo: `index.js → handler.js → runHooks → comandos`?
+- [ ] O que estou adicionando é um **comando** (ativado por prefixo) ou um **hook** (intercepta mensagens)?
+- [ ] Se é um hook: ele tem filtros adequados? O que acontece se retornar `true` acidentalmente?
+- [ ] Estou mexendo em um arquivo **global** (`handler.js`, `loader.js`, `config.js`, `hooks.js`)? Se sim, o impacto é enorme — testar muito.
+- [ ] Essa mudança pode afetar **permissões** ou **cooldowns** de outros comandos?
+- [ ] Rodei `node --check ARQUIVO.js` antes de salvar?
+- [ ] O export default existe no arquivo de comando?
+- [ ] Se adicionei DB: criei a instância em `database.js` e exportei?
+- [ ] Se adicionei config: adicionei em `DEFAULTS` e decidi se é `ENV_ONLY`?
+- [ ] Testei mentalmente o impacto em: grupos normais, grupos banidos, privado, dono, usuário comum?
+
+---
+
+## APÊNDICE: Exemplos reais de código do projeto
+
+### Como o loader registra hooks automaticamente
+
+```js
+// src/loader.js — dentro de loadCommands()
+const mod = await import(`${fp}?v=${v}`)
+loadHooksFromModule(mod, fp)  // ← registra hooks ANTES de registrar comandos
+const cmds = Array.isArray(mod.default) ? mod.default : [mod.default]
+```
+
+### Como `getRole` identifica o dono
+
+```js
+// src/permissions.js
+export function getRole(userId) {
+  const num   = cleanNum(userId)           // remove @s.whatsapp.net e :xx
+  const owner = cleanNum(CONFIG.owner)     // CONFIG.owner vem SEMPRE do .env
+  if (num === owner) return ROLES.DONO     // 1
+  const data = subdonsDB.get(num, null)    // checa DB de sub-donos
+  if (data) return data.role || ROLES.SUBDONO
+  return ROLES.USUARIO                     // 5 (padrão)
+}
+```
+
+### Como CONFIG persiste automaticamente
+
+```js
+// src/config.js
+export const CONFIG = new Proxy({}, {
+  get(_, prop) {
+    if (ENV_ONLY_KEYS.has(prop)) return DEFAULTS[prop] // lê do env
+    return configDB.get(prop) ?? DEFAULTS[prop]        // lê do DB
+  },
+  set(_, prop, value) {
+    configDB.set(prop, value)  // ← salva no JSON automaticamente
+    return true
+  }
+})
+// Uso: CONFIG.nome = 'Novo Nome' → salva em data/config.json
+```
+
+---
+
+*Última atualização: v30 — Documento baseado em análise do código real. Não contém informações inventadas.*
