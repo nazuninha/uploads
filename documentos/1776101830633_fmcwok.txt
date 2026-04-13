@@ -1,0 +1,2307 @@
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  SOULPET v6.0                          src/commands/rpg/soulpet.js     ║
+// ║                                                                          ║
+// ║  SETUP OBRIGATÓRIO:                                                     ║
+// ║    npm install @napi-rs/canvas @fontsource/nunito                       ║
+// ║                                                                          ║
+// ║  IA (escolha uma):                                                      ║
+// ║    .pet config groq <key>   → gratuito em console.groq.com             ║
+// ║    ANTHROPIC_API_KEY no .env                                            ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+import { downloadMediaMessage }                             from '@whiskeysockets/baileys'
+import { readFileSync, writeFileSync, existsSync,
+         mkdirSync, unlinkSync, readdirSync }               from 'fs'
+import { join }                                             from 'path'
+import { createCanvas, loadImage, GlobalFonts }            from '@napi-rs/canvas'
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §1 — FONTE (a causa raiz do texto invisível)
+//
+// @napi-rs/canvas no Linux NÃO usa fontes do sistema por padrão.
+// A solução confirmada pelo repositório oficial:
+//   1. Registrar via Buffer (não path)
+//   2. Manter o buffer no escopo do módulo (evita garbage collection)
+//   3. Usar aspas no nome da fonte no ctx.font
+// ══════════════════════════════════════════════════════════════════════════════
+
+let _fontBuf = null   // CRÍTICO: manter referência pra não ser GC'd
+let FF = '"sans-serif"'  // fallback - pode não funcionar no Linux!
+
+;(async function initFont() {
+  const FONT_NAME = 'SP'  // SoulPet font
+
+  // Tentativas em ordem de confiabilidade
+  const cands = [
+    // @fontsource/nunito (npm install @fontsource/nunito) — redondinha, fofa
+    join(process.cwd(), 'node_modules/@fontsource/nunito/files/nunito-latin-700-normal.woff'),
+    join(process.cwd(), 'node_modules/@fontsource/nunito/files/nunito-latin-400-normal.woff'),
+    // @fontsource/roboto (fallback)
+    join(process.cwd(), 'node_modules/@fontsource/roboto/files/roboto-latin-700-normal.woff'),
+    join(process.cwd(), 'node_modules/@fontsource/roboto/files/roboto-latin-400-normal.woff'),
+    // @fontsource/comic-neue (extra fofa)
+    join(process.cwd(), 'node_modules/@fontsource/comic-neue/files/comic-neue-latin-700-normal.woff'),
+    // Fontes do sistema Linux
+    '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+    '/usr/share/fonts/TTF/DejaVuSans-Bold.ttf',
+    '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+    '/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf',
+    // Fonte cacheada de download anterior
+    join(process.cwd(), 'data', 'sp_font.woff'),
+  ]
+
+  for (const p of cands) {
+    if (!existsSync(p)) continue
+    try {
+      // Buffer.from() cria uma CÓPIA — evita problema de referência inválida
+      _fontBuf = Buffer.from(readFileSync(p))
+      GlobalFonts.register(_fontBuf, FONT_NAME)
+      FF = `"${FONT_NAME}"`
+      console.log(`[SoulPet] ✅ Fonte carregada: ${p}`)
+      return
+    } catch (e) { /* tenta próxima */ }
+  }
+
+  // Último recurso: baixar NotoSans do jsDelivr e cachear
+  try {
+    const { default: axios } = await import('axios')
+    console.log('[SoulPet] 📥 Baixando fonte NotoSans...')
+    const r = await axios.get(
+      'https://cdn.jsdelivr.net/npm/@fontsource/noto-sans@5.0.0/files/noto-sans-latin-400-normal.woff',
+      { responseType: 'arraybuffer', timeout: 20000 }
+    )
+    if (!existsSync(join(process.cwd(), 'data'))) mkdirSync(join(process.cwd(), 'data'), { recursive: true })
+    const cachePath = join(process.cwd(), 'data', 'sp_font.woff')
+    _fontBuf = Buffer.from(r.data)
+    writeFileSync(cachePath, _fontBuf)
+    GlobalFonts.register(_fontBuf, FONT_NAME)
+    FF = `"${FONT_NAME}"`
+    console.log('[SoulPet] ✅ Fonte baixada e cacheada!')
+  } catch (e) {
+    console.error('[SoulPet] ❌ Fonte não encontrada! Texto no card ficará invisível.')
+    console.error('[SoulPet] ❌ Solução: npm install @fontsource/nunito')
+    FF = '"sans-serif"'
+  }
+})()
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §2 — CONFIG
+// ══════════════════════════════════════════════════════════════════════════════
+const CFG = {
+  DB:       join(process.cwd(), 'data', 'soulpet.json'),
+  CHARS:    join(process.cwd(), 'data', 'soulpet_chars'),
+  ESTADOS:  ['dormindo','doente','fome','triste','cansado','bravo','feliz','lendario','padrao'],
+  DECAY:    { fome:3, sono:2, felicidade:1, energia:.5, mana:.3 },
+  AUTO_MS:  4 * 3_600_000,
+  BAT_TURN_MS: 35_000,
+  BAT_ACEITE_MS: 60_000,
+}
+
+// Tiers de rank por nível
+const RANK_TIERS = [
+  { min:0,  nome:'Filhote',   emoji:'🐣', cor:'#78c97a' },
+  { min:10, nome:'Novato',    emoji:'🌱', cor:'#5bc8af' },
+  { min:20, nome:'Guerreiro', emoji:'⚔️', cor:'#f0c040' },
+  { min:35, nome:'Campeão',   emoji:'🏆', cor:'#e08030' },
+  { min:50, nome:'Lendário',  emoji:'⚡', cor:'#e05050' },
+  { min:70, nome:'Imortal',   emoji:'💀', cor:'#9b59b6' },
+  { min:90, nome:'Deus',      emoji:'🌟', cor:'#ff1493' },
+]
+function getTier(lvl){ return [...RANK_TIERS].reverse().find(t=>lvl>=t.min)||RANK_TIERS[0] }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §3 — DATABASE
+// ══════════════════════════════════════════════════════════════════════════════
+let _db=null, _st=null
+const ensureDir = d => { if(!existsSync(d)) mkdirSync(d,{recursive:true}) }
+function db(){
+  if(_db) return _db
+  ensureDir(join(process.cwd(),'data'))
+  try{ _db = existsSync(CFG.DB) ? JSON.parse(readFileSync(CFG.DB,'utf-8')) : {} }
+  catch{ _db={} }
+  return _db
+}
+function save(){ clearTimeout(_st); _st=setTimeout(()=>{ ensureDir(join(process.cwd(),'data')); writeFileSync(CFG.DB,JSON.stringify(db(),null,2)) },1500) }
+
+const getPet    = uid   => db()[uid]||null
+const getAllPets = ()    => Object.entries(db()).filter(([k,v])=>k[0]!=='_'&&v?.nome)
+const setPet    = (uid,d) => { db()[uid]={...d,_ts:Date.now()}; save() }
+const getCfg    = ()    => db()._cfg||{}
+const setCfg    = d     => { db()._cfg={...(db()._cfg||{}),...d}; save() }
+const getBatDB  = ()    => db()._bats||{}
+const setBatDB  = d     => { db()._bats=d; save() }
+const getGEvDB  = ()    => db()._gevs||[]
+const setGEvDB  = d     => { db()._gevs=d; save() }
+
+let _petlistCache = []
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §4 — IA (Groq → Anthropic → fallback)
+// ══════════════════════════════════════════════════════════════════════════════
+async function iaCall(prompt, max=150){
+  const cfg = getCfg()
+  const gk  = cfg.groq_key || ''
+  const ak  = process.env.ANTHROPIC_API_KEY || ''
+
+  if (!gk && !ak) {
+    console.log('[SP IA] Sem chave configurada — usando fallback')
+    return null
+  }
+
+  if (gk) {
+    try {
+      const { default: axios } = await import('axios')
+      console.log('[SP IA] → Groq llama-3.1-8b-instant...')
+      const r = await axios.post(
+        'https://api.groq.com/openai/v1/chat/completions',
+        { model:'llama-3.1-8b-instant', max_tokens:max, temperature:0.9,
+          messages:[{role:'user',content:prompt}] },
+        { headers:{ Authorization:`Bearer ${gk}`, 'Content-Type':'application/json' }, timeout:12000 }
+      )
+      const txt = r.data.choices?.[0]?.message?.content?.trim()
+      console.log('[SP IA] ✅ Groq OK:', txt?.slice(0,60))
+      return txt || null
+    } catch(e){
+      console.error('[SP IA] ❌ Groq erro:', e.response?.data?.error?.message || e.message)
+    }
+  }
+
+  if (ak) {
+    try {
+      const { default: axios } = await import('axios')
+      console.log('[SP IA] → Anthropic...')
+      const r = await axios.post(
+        'https://api.anthropic.com/v1/messages',
+        { model:'claude-haiku-4-5-20251001', max_tokens:max, messages:[{role:'user',content:prompt}] },
+        { headers:{ 'x-api-key':ak, 'anthropic-version':'2023-06-01', 'Content-Type':'application/json' }, timeout:12000 }
+      )
+      const txt = r.data.content?.[0]?.text?.trim()
+      console.log('[SP IA] ✅ Anthropic OK:', txt?.slice(0,60))
+      return txt || null
+    } catch(e){
+      console.error('[SP IA] ❌ Anthropic erro:', e.response?.data || e.message)
+    }
+  }
+
+  return null
+}
+
+async function iaCriarPers(nome, base){
+  const r = await iaCall(
+    `Gere personalidade para pet virtual chamado "${nome}" com base: "${base}".
+Responda SOMENTE JSON puro, sem markdown, sem explicação extra:
+{"especie":"criatura inventada única","descricao":"2 frases","tracos_iniciais":["max 2"],"estilo_fala":"como fala","frase_marca":"max 8 palavras"}`,
+    400
+  )
+  if(r){ try{ return JSON.parse(r.replace(/```json|```/g,'').trim()) }catch(e){ console.error('[SP IA] Parse pers:', e.message) } }
+  return { especie:'Criatura Etérea', descricao:`${nome}: ${base}.`, tracos_iniciais:['curioso'], estilo_fala:base, frase_marca:'*te olha em silêncio*' }
+}
+
+async function iaFala(pet, ctx2, acao){
+  const hi  = getHI(pet.stats.humor)
+  const mem = (pet.memoria||[]).slice(-4).map(m=>`[${m.a||m.acao}] ${m.r||m.resumo}`).join('\n')||'—'
+  const r = await iaCall(
+    `Você é ${pet.nome}, um(a) "${pet.personalidade?.especie||'criatura'}".
+Essência: ${pet.personalidade?.descricao||''}
+Como fala: ${pet.personalidade?.estilo_fala||'simples'}
+Frase marca: "${pet.personalidade?.frase_marca||'...'}"
+Traços: ${pet.tracos?.join(', ')||'—'}
+Humor: ${hi.label} (${pet.stats.humor}/100) — ${pet.stats.humor<30?'responda triste/irritado':pet.stats.humor>70?'responda animado e feliz':'neutro'}
+Stats: HP ${~~pet.stats.vida}% | Fome ${~~pet.stats.fome}% | Felicidade ${~~pet.stats.felicidade}%
+Memória recente:\n${mem}
+Situação atual: ${ctx2}
+O que o dono fez: ${acao}
+RESPONDA SÓ como o pet em 1-2 frases curtas, sem prefixo, sem aspas externas.`, 120
+  )
+  if(r) return r
+  const m=pet.personalidade?.frase_marca||'...', h=pet.stats.humor
+  return h>=70?`*${pet.nome} balança animado!* ${m}`:h>=40?`*${pet.nome} te olha.* Hm.`:`*${pet.nome} vira o rosto.* Não tô com vontade.`
+}
+
+async function iaDecideBatalha(pet, poderes, myHP, myMana, enHP, cds){
+  const opts=['atacar','defender','curar']
+  const pDisp=poderes.filter(p=>p.mana<=myMana&&!(cds[p.id]>0))
+  pDisp.forEach(p=>opts.push(`poder ${p.id}`))
+  if(myHP<25) opts.push('fugir')
+
+  const r=await iaCall(
+    `Você é ${pet.nome} em batalha.
+HP:${~~myHP}/100 Mana:${~~myMana} | Inimigo HP:${~~enHP}
+Opções: ${opts.join(' | ')}
+CDs ativos: ${Object.entries(cds).filter(([,v])=>v>0).map(([k,v])=>`${k}(${v}t)`).join(',')||'nenhum'}
+Escolha a MELHOR ação. Responda APENAS o comando exato, sem explicação.`,40)
+
+  if(r){
+    const c=r.toLowerCase().trim()
+    for(const o of opts){ if(c.includes(o.replace('poder ','').split(' ')[0])) return o }
+  }
+  // Fallback inteligente
+  if(myHP<30&&myMana>=12) return 'curar'
+  if(pDisp.length&&myMana>=20&&Math.random()>.4) return `poder ${pDisp[~~(Math.random()*pDisp.length)].id}`
+  return 'atacar'
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §5 — STATS + LEVEL
+// ══════════════════════════════════════════════════════════════════════════════
+const clamp  = (v,a=0,b=100) => Math.min(b,Math.max(a,v))
+const calcH  = p => ~~(p.stats.felicidade*.4+p.stats.fome*.25+p.stats.sono*.2+p.stats.energia*.15)
+
+function getHI(h){
+  if(h>=80) return{emoji:'😄',label:'Radiante', hex:'#22c55e',bg:'#dcfce7'}
+  if(h>=60) return{emoji:'😊',label:'Animado',  hex:'#84cc16',bg:'#ecfccb'}
+  if(h>=40) return{emoji:'😐',label:'Neutro',   hex:'#eab308',bg:'#fefce8'}
+  if(h>=25) return{emoji:'😒',label:'Irritado', hex:'#f97316',bg:'#fff7ed'}
+  return      {emoji:'😠',label:'Furioso',  hex:'#ef4444',bg:'#fef2f2'}
+}
+
+// Sistema de Level
+function calcNivel(totalXP){
+  let lvl=0, acum=0
+  while(true){ const needed=100+lvl*50; if(acum+needed>totalXP) break; acum+=needed; lvl++ }
+  const needed=100+lvl*50, progresso=totalXP-acum
+  return { lvl, xpAtual:progresso, xpProx:needed, pct:progresso/needed }
+}
+
+function ganharXP(pet, quantidade){
+  pet.xpTotal = (pet.xpTotal||0)+quantidade
+  const antes = calcNivel(pet.xpTotal-quantidade).lvl
+  const depois = calcNivel(pet.xpTotal).lvl
+  if(depois>antes) return depois  // level up!
+  return null
+}
+
+function decay(pet){
+  const now=Date.now(), h=(now-(pet.ultimaInteracao||now))/3_600_000
+  if(h<.05) return pet
+  const d=pet.dormindo, s=pet.stats
+  s.fome       =clamp(s.fome      -CFG.DECAY.fome      *h)
+  s.sono       =clamp(s.sono      +(d?4:-CFG.DECAY.sono)*h)
+  s.felicidade =clamp(s.felicidade-CFG.DECAY.felicidade*h)
+  s.energia    =clamp(s.energia   +(d?3:-CFG.DECAY.energia)*h)
+  s.mana       =clamp(s.mana      +(d?2:-CFG.DECAY.mana)*h)
+  s.humor      =calcH(pet)
+  if(s.fome<=15) s.vida=clamp(s.vida-2*h)
+  if(s.felicidade<10){ pet.felBaixa=pet.felBaixa||now; if((now-pet.felBaixa)>72*3_600_000&&pet.status==='vivo') pet.status='quebrado' }
+  else pet.felBaixa=null
+  if(s.vida<=10&&pet.status==='vivo') pet.status='fugiu'
+  if(h>=1){ pet.histFel=pet.histFel||[]; pet.histFel.push(~~s.felicidade); if(pet.histFel.length>200) pet.histFel=pet.histFel.slice(-200) }
+  pet.ultimaInteracao=now
+  return pet
+}
+
+function getEstado(pet){
+  const s=pet.stats
+  if(pet.dormindo)               return 'dormindo'
+  if(pet.status_temp==='doente') return 'doente'
+  if(s.fome<20)                  return 'fome'
+  if(s.humor<20)                 return 'bravo'
+  if(s.felicidade<30)            return 'triste'
+  if(s.energia<20)               return 'cansado'
+  if(pet.evolucao?.forma==='Forma Lendária') return 'lendario'
+  if(s.humor>=75)                return 'feliz'
+  return 'padrao'
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §6 — PODERES EXPANDIDOS E PERSONALIZADOS
+// ══════════════════════════════════════════════════════════════════════════════
+const POOL = {
+  // ── Fogo ─────────────────────────────────────────────────────────────────
+  chama:    {nome:'Chama',       emoji:'🔥',  tipo:'atk',  dano:28, mana:12, cd:1, desc:'Queima com uma chama agressiva'},
+  inferno:  {nome:'Inferno',     emoji:'🌋',  tipo:'atk',  dano:50, mana:28, cd:3, desc:'Erupção devastadora de fogo'},
+  brasa:    {nome:'Brasa',       emoji:'💥',  tipo:'spc',  dano:15, mana:8,  cd:0, desc:'Ataque rápido que reduz o escudo inimigo', efeito:'break_shield'},
+  // ── Água ──────────────────────────────────────────────────────────────────
+  onda:     {nome:'Onda',        emoji:'🌊',  tipo:'atk',  dano:22, mana:10, cd:0, desc:'Golpe de água certeiro'},
+  gelo:     {nome:'Cristal Gelo',emoji:'❄️', tipo:'spc',  dano:18, mana:14, cd:2, desc:'30% de chance de congelar (pular turno)', efeito:'freeze30'},
+  tsunami:  {nome:'Tsunami',     emoji:'🌀',  tipo:'atk',  dano:55, mana:35, cd:4, desc:'Onda devastadora e imparável'},
+  // ── Terra ─────────────────────────────────────────────────────────────────
+  terremoto:{nome:'Terremoto',   emoji:'⛰️', tipo:'atk',  dano:45, mana:25, cd:3, desc:'Sacode o chão sob o inimigo'},
+  espinhos: {nome:'Espinhos',    emoji:'🌵',  tipo:'spc',  dano:8,  mana:8,  cd:0, desc:'Revida 50% do próximo dano recebido', efeito:'espinhos2'},
+  pedrada:  {nome:'Pedrada',     emoji:'🪨',  tipo:'atk',  dano:20, mana:8,  cd:0, desc:'Arremessa uma rocha pesada'},
+  // ── Raio ──────────────────────────────────────────────────────────────────
+  trovao:   {nome:'Trovão',      emoji:'⚡',  tipo:'atk',  dano:35, mana:18, cd:1, desc:'Raio rápido e poderoso'},
+  tempestade:{nome:'Tempestade', emoji:'🌩️', tipo:'atk',  dano:60, mana:38, cd:4, desc:'Invoca uma tempestade elétrica'},
+  descarga: {nome:'Descarga',    emoji:'💫',  tipo:'spc',  dano:20, mana:15, cd:2, desc:'Stun de 40% de chance', efeito:'stun40'},
+  // ── Sombra ────────────────────────────────────────────────────────────────
+  sombra:   {nome:'Golpe Sombra',emoji:'🌑',  tipo:'atk',  dano:30, mana:15, cd:1, desc:'Ataque vindo das trevas'},
+  drenar:   {nome:'Drenar Alma', emoji:'🌀',  tipo:'spc',  dano:22, mana:20, cd:2, desc:'Rouba 15 HP do inimigo', efeito:'drenar'},
+  maldição: {nome:'Maldição',    emoji:'🩸',  tipo:'spc',  dano:0,  mana:18, cd:3, desc:'Aplica veneno profundo por 4 turnos', efeito:'veneno4'},
+  ilusão:   {nome:'Ilusão',      emoji:'👁️', tipo:'def',  shield:35,mana:14,cd:2, desc:'Cria uma sombra que absorve dano'},
+  // ── Luz ───────────────────────────────────────────────────────────────────
+  cura_m:   {nome:'Cura',        emoji:'💚',  tipo:'heal', cura:22, mana:12, cd:1, desc:'Recupera vida moderada'},
+  cura_M:   {nome:'Cura Total',  emoji:'💚✨',tipo:'heal', cura:48, mana:28, cd:3, desc:'Recupera vida significativa'},
+  sagrado:  {nome:'Golpe Sagrado',emoji:'✨', tipo:'atk',  dano:38, mana:20, cd:2, desc:'Dano duplo contra pets Sombra'},
+  escudo_d: {nome:'Escudo Divino',emoji:'🛡️',tipo:'def',  shield:60,mana:22,cd:3, desc:'Proteção máxima por 1 turno'},
+  // ── Veneno ────────────────────────────────────────────────────────────────
+  veneno:   {nome:'Veneno',      emoji:'☠️', tipo:'spc',  dano:0,  mana:15, cd:3, desc:'Envenena por 3 turnos', efeito:'veneno3'},
+  ácido:    {nome:'Ácido',       emoji:'🧪',  tipo:'spc',  dano:12, mana:12, cd:1, desc:'Corrói o escudo inimigo (-50%)', efeito:'corrode'},
+  // ── Básicos ───────────────────────────────────────────────────────────────
+  mordida:  {nome:'Mordida',     emoji:'🦷',  tipo:'atk',  dano:15, mana:3,  cd:0, desc:'Ataque instintivo rápido'},
+  garra:    {nome:'Garra',       emoji:'🌿',  tipo:'atk',  dano:22, mana:7,  cd:0, desc:'Arranhão afiado e certeiro'},
+  escudo:   {nome:'Escudo',      emoji:'🛡️', tipo:'def',  shield:40,mana:10,cd:1, desc:'Forma um escudo protetor'},
+  roubo_m:  {nome:'Roubo de Mana',emoji:'💜', tipo:'spc',  mana:10, cd:2,    desc:'Rouba 25 mana do inimigo', efeito:'roubo_mana'},
+  // ── Ultimates ────────────────────────────────────────────────────────────
+  devastação:{nome:'Devastação', emoji:'💥',  tipo:'ult',  dano:80, mana:55, cd:5, desc:'Golpe absoluto e imparável'},
+  bênção:   {nome:'Bênção',      emoji:'🌟',  tipo:'ult',  cura:55, shield:35,mana:50,cd:5,desc:'Cura e escudo supremos'},
+  apocalipse:{nome:'Apocalipse', emoji:'🔴',  tipo:'ult',  dano:95, mana:65, cd:6, desc:'O poder mais destrutivo'},
+  renascer: {nome:'Renascer',    emoji:'🦅',  tipo:'ult',  cura:80, mana:60, cd:6, desc:'Ressurge com HP quase cheio'},
+}
+
+function hashStr(s){ let h=5381; for(const c of s) h=(h*33+c.charCodeAt(0))&0x7fffffff; return h }
+
+function getPoderes(pet){
+  const est=pet.evolucao?.estagio||0, tr=pet.tracos||[]
+  const h=hashStr(pet.personalidade?.especie||pet.nome)
+  const ids=new Set(['mordida'])
+
+  // Segundo poder pelo hash da espécie (personalizado)
+  const atks=['garra','chama','onda','trovao','sombra','pedrada']
+  ids.add(atks[h%atks.length])
+
+  // Traços desbloqueiam poderes específicos
+  if(tr.includes('guerreiro'))   ids.add('inferno')
+  if(tr.includes('protetor'))    { ids.add('escudo'); ids.add('espinhos') }
+  if(tr.includes('carente'))     ids.add('cura_m')
+  if(tr.includes('brincalhão'))  ids.add('brasa')
+  if(tr.includes('disciplinado'))ids.add('roubo_m')
+  if(tr.includes('glutão'))      ids.add('drenar')
+  if(tr.includes('filho_eclipse'))ids.add('maldição')
+  if(tr.includes('abençoado'))   { ids.add('sagrado'); ids.add('escudo_d') }
+
+  // Estágio 2: especiais baseados no elemento da espécie
+  if(est>=2){
+    const spcs=['veneno','gelo','descarga','drenar','ilusão','ácido']
+    ids.add(spcs[h%spcs.length])
+    ids.add(spcs[(h+1)%spcs.length])
+    ids.add('escudo')
+    ids.add('cura_m')
+  }
+
+  // Estágio 3: poderes avançados + ultimate
+  if(est>=3){
+    ids.add('cura_M')
+    const advs=['tempestade','tsunami','terremoto','sagrado']
+    ids.add(advs[h%advs.length])
+    // Ultimate baseado na forma
+    const f=pet.evolucao?.forma||''
+    if(f.includes('Lendária')||f.includes('Lendario')) { ids.add('apocalipse'); ids.add('renascer') }
+    else if(f.includes('Sombra')) ids.add('devastação')
+    else if(f.includes('Guardião')) ids.add('bênção')
+    else ids.add('devastação')
+  }
+
+  return [...ids].map(id=>({id,...POOL[id]})).filter(p=>p.nome)
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §7 — CANVAS: CARD DE PET (redesenhado)
+// ══════════════════════════════════════════════════════════════════════════════
+function getCharPath(uid, estado){
+  for(const ext of ['png','jpg','jpeg','webp']){
+    const p=join(CFG.CHARS,uid,`${estado}.${ext}`); if(existsSync(p)) return p
+  }
+  for(const ext of ['png','jpg','jpeg','webp']){
+    const p=join(CFG.CHARS,uid,`padrao.${ext}`); if(existsSync(p)) return p
+  }
+  return null
+}
+
+// roundRect manual (sem bugs de versão)
+function rr(ctx,x,y,w,h,r){ r=Math.min(r,w/2,h/2); ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath() }
+
+// Texto com outline (efeito cartoon)
+function txtOutline(ctx, txt, x, y, col='#2d1b07', outlineCol='#fff', outlineW=3){
+  ctx.strokeStyle=outlineCol; ctx.lineWidth=outlineW; ctx.lineJoin='round'; ctx.strokeText(txt,x,y)
+  ctx.fillStyle=col; ctx.fillText(txt,x,y)
+}
+
+async function renderCard(pet, uid){
+  const W=860, H=500, canvas=createCanvas(W,H), ctx=canvas.getContext('2d')
+  const hi     = getHI(pet.stats.humor)
+  const nivel  = calcNivel(pet.xpTotal||0)
+  const tier   = getTier(nivel.lvl)
+  const DARK   = '#2d1b07'
+  const estado = getEstado(pet)
+
+  // ── Fundo gradiente ───────────────────────────────────────────────────────
+  const bg=ctx.createLinearGradient(0,0,W,H)
+  bg.addColorStop(0,'#fffbf0'); bg.addColorStop(1,'#fde8c8')
+  ctx.fillStyle=bg; ctx.fillRect(0,0,W,H)
+
+  // Borda cartoon
+  ctx.strokeStyle=DARK; ctx.lineWidth=6; rr(ctx,4,4,W-8,H-8,24); ctx.stroke()
+
+  // Bolinhas decorativas de fundo
+  const DOTS=[[70,70,20,'#ffd6a5'],[W-75,55,15,'#a0c4ff'],[45,H-65,13,'#caffbf'],[W-55,H-75,17,'#ffc6ff'],[W/2,25,11,'#ffffb5']]
+  for(const[dx,dy,dr,dc] of DOTS){ ctx.beginPath(); ctx.arc(dx,dy,dr,0,Math.PI*2); ctx.fillStyle=dc; ctx.fill(); ctx.strokeStyle=DARK; ctx.lineWidth=2; ctx.stroke() }
+
+  // ── Painel esquerdo (imagem) ───────────────────────────────────────────────
+  const IW=268, IX=18, IY=18, IH=H-36
+
+  // Sombra do painel
+  ctx.save(); ctx.shadowColor='#00000030'; ctx.shadowBlur=12; ctx.shadowOffsetX=4; ctx.shadowOffsetY=4
+  rr(ctx,IX,IY,IW,IH,20); ctx.fillStyle='#ffe8c8'; ctx.fill(); ctx.restore()
+  ctx.strokeStyle=DARK; ctx.lineWidth=4; rr(ctx,IX,IY,IW,IH,20); ctx.stroke()
+
+  // Imagem do personagem
+  const imgPath=getCharPath(uid,estado)
+  if(imgPath){
+    try{
+      const img=await loadImage(imgPath), sc=Math.min((IW-24)/img.width,(IH-55)/img.height)
+      const dw=img.width*sc, dh=img.height*sc
+      ctx.drawImage(img,IX+(IW-dw)/2,IY+(IH-dh)/2-8,dw,dh)
+    }catch{}
+  } else {
+    ctx.font=`88px ${FF}`;  ctx.textAlign='center'; ctx.fillStyle=DARK
+    ctx.fillText(['🥚','🐣','🌿','✨','👑'][pet.evolucao?.estagio||0]||'🐾',IX+IW/2,IY+IH/2+28)
+  }
+
+  // Badge de estado (rodapé do painel)
+  const bdgTxt={dormindo:'💤 Dormindo',doente:'🤒 Doente',fome:'🍖 Fome',bravo:'😤 Bravo',triste:'😢 Triste',cansado:'😓 Cansado',feliz:'😄 Feliz',lendario:'⚡ Lendário',padrao:''}[estado]
+  if(bdgTxt){
+    rr(ctx,IX+8,IY+IH-36,IW-16,28,10); ctx.fillStyle='#2d1b07cc'; ctx.fill()
+    ctx.font=`bold 13px ${FF}`; ctx.textAlign='center'; ctx.fillStyle='#fff'
+    ctx.fillText(bdgTxt,IX+IW/2,IY+IH-16)
+  }
+
+  // Mood emoji + frase marca (parte de baixo do painel)
+  const fraseMarca = (pet.personalidade?.frase_marca||'').slice(0,22)
+  if(fraseMarca){
+    ctx.font=`italic 11px ${FF}`; ctx.textAlign='center'; ctx.fillStyle='#7c5c2e'
+    ctx.fillText(`"${fraseMarca}"`,IX+IW/2,IY+IH-46)
+  }
+
+  // ── Painel direito ────────────────────────────────────────────────────────
+  const RX=IX+IW+18, RW=W-RX-16
+
+  // Linha 1: Nome do pet (com outline cartoon)
+  ctx.font=`bold 30px ${FF}`; ctx.textAlign='left'
+  txtOutline(ctx, pet.nome||'???', RX, 46, DARK, '#fff', 4)
+
+  // Linha 2: espécie + forma
+  ctx.font=`14px ${FF}`; ctx.fillStyle='#7c5c2e'
+  ctx.fillText(`${pet.personalidade?.especie||'???'} • ${pet.evolucao?.forma||'Ovo'}`,RX,64)
+
+  // Level badge + tier (à direita do nome)
+  const tierData=tier, lvlTxt=`LVL ${nivel.lvl}`
+  ctx.save()
+  // Fundo do badge
+  ctx.shadowColor='#00000025'; ctx.shadowBlur=6; ctx.shadowOffsetX=2; ctx.shadowOffsetY=2
+  rr(ctx,RX+RW-145,14,66,28,10); ctx.fillStyle=tierData.cor; ctx.fill(); ctx.restore()
+  ctx.strokeStyle=DARK; ctx.lineWidth=2; rr(ctx,RX+RW-145,14,66,28,10); ctx.stroke()
+  ctx.font=`bold 13px ${FF}`; ctx.textAlign='center'; ctx.fillStyle='#fff'
+  txtOutline(ctx,lvlTxt,RX+RW-145+33,33,DARK,'#fff',0)
+  ctx.fillStyle=DARK; ctx.fillText(lvlTxt,RX+RW-145+33,33)
+
+  // Tier badge
+  rr(ctx,RX+RW-74,14,70,28,10); ctx.fillStyle=tierData.cor+'44'; ctx.fill()
+  ctx.strokeStyle=tierData.cor; ctx.lineWidth=2; rr(ctx,RX+RW-74,14,70,28,10); ctx.stroke()
+  ctx.font=`bold 12px ${FF}`; ctx.textAlign='center'; ctx.fillStyle=tierData.cor
+  ctx.fillText(`${tierData.emoji} ${tierData.nome}`,RX+RW-74+35,33)
+
+  // Humor badge
+  rr(ctx,RX,72,136,26,13); ctx.fillStyle=hi.hex; ctx.fill()
+  ctx.strokeStyle=DARK; ctx.lineWidth=2; rr(ctx,RX,72,136,26,13); ctx.stroke()
+  ctx.font=`bold 12px ${FF}`; ctx.textAlign='center'; ctx.fillStyle='#fff'
+  ctx.fillText(`${hi.emoji} ${hi.label}`,RX+68,87)
+
+  // ── Barras de stats ───────────────────────────────────────────────────────
+  const STATS=[
+    ['vida',      '❤️ Vida',      '#ff6b6b'],
+    ['fome',      '🍖 Fome',      '#ff9f43'],
+    ['sono',      '😴 Sono',      '#a29bfe'],
+    ['felicidade','😊 Fel.',      '#fdcb6e'],
+    ['energia',   '⚡ Energia',   '#55efc4'],
+    ['mana',      '✨ Mana',      '#fd79a8'],
+  ]
+  const BY0=108, BG=52, BH=16, LW=78
+
+  STATS.forEach(([k,lb,c],i)=>{
+    const y=BY0+i*BG, val=~~clamp(pet.stats[k]||0), pct=val/100
+    const bx=RX+LW, bw=RW-LW
+
+    // Label (com outline)
+    ctx.font=`bold 13px ${FF}`; ctx.textAlign='left'
+    ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.strokeText(lb,RX,y+5)
+    ctx.fillStyle=DARK; ctx.fillText(lb,RX,y+5)
+
+    // Fundo da barra
+    rr(ctx,bx,y-10,bw,BH,BH/2); ctx.fillStyle='#e8d5b0'; ctx.fill()
+    ctx.strokeStyle=DARK; ctx.lineWidth=1.5; rr(ctx,bx,y-10,bw,BH,BH/2); ctx.stroke()
+
+    // Preenchimento
+    if(pct>.02){
+      const fw=Math.max(BH,bw*pct)
+      rr(ctx,bx,y-10,fw,BH,BH/2); ctx.fillStyle=c; ctx.fill()
+      ctx.strokeStyle=DARK; ctx.lineWidth=1.5; rr(ctx,bx,y-10,fw,BH,BH/2); ctx.stroke()
+      ctx.beginPath(); ctx.arc(bx+fw-BH/2,y-10+BH/2,BH/2+2,0,Math.PI*2)
+      ctx.fillStyle=c; ctx.fill(); ctx.strokeStyle=DARK; ctx.lineWidth=1.5; ctx.stroke()
+    }
+
+    // Valor
+    ctx.font=`bold 11px ${FF}`; ctx.textAlign='right'; ctx.fillStyle=DARK
+    ctx.fillText(`${val}%`,RX+RW,y+5)
+  })
+
+  // ── XP bar ────────────────────────────────────────────────────────────────
+  const XY=H-76
+  ctx.font=`11px ${FF}`; ctx.textAlign='left'; ctx.fillStyle='#7c5c2e'
+  ctx.fillText(`XP ${nivel.xpAtual} / ${nivel.xpProx}`,RX,XY-2)
+  ctx.font=`11px ${FF}`; ctx.textAlign='right'; ctx.fillStyle='#7c5c2e'
+  ctx.fillText(`→ LVL ${nivel.lvl+1}`,RX+RW,XY-2)
+
+  rr(ctx,RX,XY+2,RW,10,5); ctx.fillStyle='#e8d5b0'; ctx.fill()
+  ctx.strokeStyle=DARK; ctx.lineWidth=1; rr(ctx,RX,XY+2,RW,10,5); ctx.stroke()
+  if(nivel.pct>.01){
+    rr(ctx,RX,XY+2,RW*nivel.pct,10,5); ctx.fillStyle=tier.cor; ctx.fill()
+    ctx.strokeStyle=DARK; ctx.lineWidth=1; rr(ctx,RX,XY+2,RW*nivel.pct,10,5); ctx.stroke()
+  }
+
+  // ── Rodapé ────────────────────────────────────────────────────────────────
+  const FY=H-52
+  ctx.save(); ctx.shadowColor='#00000015'; ctx.shadowBlur=6; ctx.shadowOffsetX=2; ctx.shadowOffsetY=2
+  rr(ctx,RX,FY-2,RW,44,12); ctx.fillStyle='#fff5e0'; ctx.fill(); ctx.restore()
+  ctx.strokeStyle=DARK; ctx.lineWidth=2; rr(ctx,RX,FY-2,RW,44,12); ctx.stroke()
+
+  const FD=[['💰',`${pet.economia?.moedas||0}`,'moedas'],['🏷️',`${pet.tracos?.length||0}`,'traços'],['⚔️',`${pet.social?.batalhas_vencidas||0}W`,'batalhas']]
+  const fc=RW/3
+  FD.forEach(([ic,vl,lb],i)=>{
+    const cx=RX+fc*i+fc/2; ctx.textAlign='center'
+    ctx.font=`bold 14px ${FF}`; ctx.fillStyle=DARK; ctx.fillText(`${ic} ${vl}`,cx,FY+12)
+    ctx.font=`10px ${FF}`; ctx.fillStyle='#7c5c2e'; ctx.fillText(lb,cx,FY+28)
+  })
+
+  ctx.font=`9px ${FF}`; ctx.textAlign='right'; ctx.fillStyle='#c8a87060'; ctx.fillText('SoulPet v6',W-12,H-7)
+
+  // CRÍTICO: canvas.encode retorna Promise — DEVE ser awaited
+  return await canvas.encode('png')
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §8 — CANVAS: CARD DE RANKING GLOBAL
+// ══════════════════════════════════════════════════════════════════════════════
+async function renderRankCard(lista){
+  const W=800, H=80+lista.length*68+30, canvas=createCanvas(W,H), ctx=canvas.getContext('2d')
+
+  // Fundo escuro com estrelas
+  const bg=ctx.createLinearGradient(0,0,0,H)
+  bg.addColorStop(0,'#1a1032'); bg.addColorStop(1,'#0d0820')
+  ctx.fillStyle=bg; ctx.fillRect(0,0,W,H)
+
+  // Estrelas decorativas
+  const seed=[1,3,7,13,17,23,31,37,41,47,53]
+  seed.forEach((s,i)=>{ ctx.beginPath(); ctx.arc((s*73)%W,(s*37)%H,Math.min(s%3+1,3),0,Math.PI*2); ctx.fillStyle=`rgba(255,255,255,${.2+((i*7)%5)*.1})`; ctx.fill() })
+
+  // Título
+  ctx.font=`bold 28px ${FF}`; ctx.textAlign='center'
+  const grad=ctx.createLinearGradient(W/2-150,0,W/2+150,0)
+  grad.addColorStop(0,'#ffd700'); grad.addColorStop(.5,'#fffacd'); grad.addColorStop(1,'#ffd700')
+  ctx.fillStyle=grad; ctx.fillText('🏆 RANKING SOULPET 🏆',W/2,46)
+
+  // Separador
+  ctx.strokeStyle='rgba(255,215,0,0.4)'; ctx.lineWidth=1
+  ctx.beginPath(); ctx.moveTo(40,58); ctx.lineTo(W-40,58); ctx.stroke()
+
+  // Itens
+  const MEDALS=['🥇','🥈','🥉','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟']
+  const ESTAR=['🥚','🐣','🌿','✨','👑']
+
+  for(const[i,p] of lista.entries()){
+    const Y=80+i*68, tier=getTier(p.nivel||0)
+    const isTop3=i<3
+
+    // Fundo do item
+    const itBg=ctx.createLinearGradient(20,Y,W-20,Y)
+    itBg.addColorStop(0,isTop3?`${tier.cor}22`:'rgba(255,255,255,0.05)')
+    itBg.addColorStop(1,'transparent')
+    rr(ctx,20,Y,W-40,60,12); ctx.fillStyle=itBg; ctx.fill()
+    ctx.strokeStyle=isTop3?`${tier.cor}66`:'rgba(255,255,255,0.1)'; ctx.lineWidth=1
+    rr(ctx,20,Y,W-40,60,12); ctx.stroke()
+
+    // Medalha
+    ctx.font=`22px ${FF}`; ctx.textAlign='left'; ctx.fillStyle='#fff'
+    ctx.fillText(MEDALS[i]||`${i+1}.`,28,Y+38)
+
+    // Imagem ou emoji do pet
+    const imgPath=getCharPath(p.uid, 'padrao')
+    if(imgPath){
+      try{
+        const img=await loadImage(imgPath)
+        // Circular clip
+        ctx.save(); ctx.beginPath(); ctx.arc(80,Y+30,25,0,Math.PI*2); ctx.clip()
+        ctx.drawImage(img,55,Y+5,50,50); ctx.restore()
+        ctx.beginPath(); ctx.arc(80,Y+30,25,0,Math.PI*2)
+        ctx.strokeStyle=tier.cor; ctx.lineWidth=2.5; ctx.stroke()
+      }catch{
+        ctx.font=`24px ${FF}`; ctx.textAlign='center'; ctx.fillText(ESTAR[p.estagio||0],80,Y+38)
+      }
+    } else {
+      ctx.font=`24px ${FF}`; ctx.textAlign='center'; ctx.fillText(ESTAR[p.estagio||0],80,Y+38)
+    }
+
+    // Nome + dono
+    ctx.font=`bold 17px ${FF}`; ctx.textAlign='left'; ctx.fillStyle='#ffffff'
+    ctx.fillText(p.nome,112,Y+26)
+    ctx.font=`11px ${FF}`; ctx.fillStyle='rgba(255,255,255,0.55)'
+    ctx.fillText(`${p.forma||'Ovo'} • ${p.dono}`,112,Y+44)
+
+    // Level + tier badge
+    rr(ctx,W-235,Y+13,65,26,10); ctx.fillStyle=`${tier.cor}33`; ctx.fill()
+    ctx.strokeStyle=tier.cor; ctx.lineWidth=1.5; rr(ctx,W-235,Y+13,65,26,10); ctx.stroke()
+    ctx.font=`bold 12px ${FF}`; ctx.textAlign='center'; ctx.fillStyle=tier.cor
+    ctx.fillText(`LVL ${p.nivel||0}`,W-235+32.5,Y+30)
+
+    // XP
+    ctx.font=`bold 13px ${FF}`; ctx.textAlign='right'; ctx.fillStyle='#ffd700'
+    ctx.fillText(`⭐ ${p.xp.toLocaleString()}`,W-35,Y+24)
+    ctx.font=`10px ${FF}`; ctx.fillStyle='rgba(255,215,0,0.5)'
+    ctx.fillText('XP',W-35,Y+38)
+
+    // Tier emoji
+    ctx.font=`16px ${FF}`; ctx.textAlign='right'; ctx.fillStyle=tier.cor
+    ctx.fillText(tier.emoji,W-35,Y+55)
+  }
+
+  ctx.font=`9px ${FF}`; ctx.textAlign='right'; ctx.fillStyle='rgba(255,255,255,0.2)'
+  ctx.fillText('SoulPet v6',W-12,H-8)
+
+  return await canvas.encode('png')
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §9 — MEDIA DOWNLOAD
+// ══════════════════════════════════════════════════════════════════════════════
+function extrairImg(msg){
+  if(msg?.message?.imageMessage) return{obj:msg,img:msg.message.imageMessage}
+  const q=msg?.message?.extendedTextMessage?.contextInfo?.quotedMessage
+  if(q?.imageMessage) return{obj:{key:msg.key,message:{imageMessage:q.imageMessage}},img:q.imageMessage}
+  return null
+}
+async function baixarImg(obj,sock){
+  const buf=await downloadMediaMessage(obj,'buffer',{},{reuploadRequest:sock.updateMediaMessage})
+  if(!buf||buf.length===0) throw new Error('Buffer vazio — reenvie a imagem')
+  return buf
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §10 — ECONOMIA, ITENS, EVOLUÇÃO, TRAÇOS
+// ══════════════════════════════════════════════════════════════════════════════
+const ITENS={
+  'ração':       {nome:'Ração',          e:'🍖', p:20, r:'comum',   t:'comida',   ef:{fome:30,felicidade:5}},
+  'festim':      {nome:'Festim Real',    e:'🍗', p:80, r:'incomum', t:'comida',   ef:{fome:70,felicidade:20}},
+  'elixir_fome': {nome:'Elixir Fome',    e:'🫙', p:150,r:'raro',    t:'comida',   ef:{fome:100}},
+  'bolinha':     {nome:'Bolinha',        e:'⚽', p:30, r:'comum',   t:'brinquedo',ef:{felicidade:20,energia:-10}},
+  'puzzle':      {nome:'Puzzle',         e:'🧩', p:100,r:'incomum', t:'brinquedo',ef:{felicidade:25,mana:10}},
+  'pelúcia':     {nome:'Pelúcia',        e:'🧸', p:60, r:'incomum', t:'brinquedo',ef:{felicidade:30,humor:15}},
+  'bola_cravo':  {nome:'Bola com Cravo', e:'🎯', p:200,r:'raro',    t:'brinquedo',ef:{felicidade:40,mana:20}},
+  'pocao_vida':  {nome:'Poção de Vida',  e:'❤️',p:60, r:'comum',   t:'pocao',    ef:{vida:40}},
+  'pocao_mana':  {nome:'Poção de Mana',  e:'💙',p:80, r:'incomum', t:'pocao',    ef:{mana:60}},
+  'pocao_ener':  {nome:'Poção Energia',  e:'💚',p:70, r:'comum',   t:'pocao',    ef:{energia:50,sono:20}},
+  'elixir_alma': {nome:'Elixir da Alma', e:'💜',p:500,r:'épico',   t:'pocao',    ef:{vida:100,felicidade:100}},
+  'amuleto':     {nome:'Amuleto',        e:'🔰',p:800,r:'épico',   t:'especial', ef:{_prot:true}},
+  'runa_lend':   {nome:'Runa Lendária',  e:'⚡',p:2000,r:'lendário',t:'especial',ef:{_evo:true}},
+  'espelho':     {nome:'Espelho Alma',   e:'🪞',p:400,r:'raro',    t:'especial', ef:{_humor:true}},
+  'elixir_bat':  {nome:'Elixir Batalha', e:'🗡️',p:300,r:'raro',   t:'especial', ef:{_bat_boost:true}},
+  'perfume':     {nome:'Perfume Místico',e:'🌸',p:120,r:'incomum', t:'especial', ef:{felicidade:25,humor:20,_carinho_boost:true}},
+}
+const RE={comum:'⚪',incomum:'🟢',raro:'🔵',épico:'🟣',lendário:'🌟'}
+const LOJA_FX=['ração','bolinha','pocao_vida','pocao_mana','pocao_ener']
+const LOJA_RT=['festim','puzzle','pelúcia','espelho','amuleto','elixir_fome','elixir_bat','perfume','bola_cravo']
+
+function checarEvo(pet){
+  const d=(Date.now()-pet.criadoEm)/86_400_000, s=pet.evolucao.estagio
+  if(s===0&&d>=1&&pet.stats.vida>=60) return{ok:1,s:1,f:'Filhote',msg:'🥚➡️🐣 Chocou!'}
+  if(s===1&&d>=7){ const ok=(pet.histFel||[50]).reduce((a,b)=>a+b,0)/Math.max(pet.histFel?.length||1,1)>=65; return{ok:1,s:2,f:ok?'Jovem Guardião':'Jovem Sombrio',msg:ok?'🌿 Jovem Guardião!':'🌑 Jovem Sombrio...'} }
+  if(s===2&&d>=30){ const bom=pet.stats.felicidade>70&&pet.stats.vida>80, lend=pet.tracos.some(t=>t.includes('abençoado'))&&bom, f=lend?'Forma Lendária':bom?'Guardião':'Sombra'; return{ok:1,s:3,f,msg:lend?'⚡ LENDÁRIO!':bom?'✨ Guardião!':'🌑 Sombra...'} }
+  return{ok:0}
+}
+function tentarEvo(pet){ const e=checarEvo(pet); if(!e.ok) return null; pet.evolucao.estagio=e.s; pet.evolucao.forma=e.f; return e.msg }
+
+function checkMissaoProgress(pet, acao){
+  if(!pet._missaoAtual||pet._missaoConcluida) return
+  if(pet._missaoData!==new Date().toDateString()) return
+  if(pet._missaoAtual.tipo===acao){
+    pet._missaoProgress=(pet._missaoProgress||0)+1
+    if(pet._missaoProgress>=pet._missaoAtual.meta&&!pet._missaoNotif){
+      pet._missaoNotif=true
+    }
+  }
+}
+
+function doTracos(pet,acao){
+  pet.ac=pet.ac||{}; pet.ac[acao]=(pet.ac[acao]||0)+1; checkMissaoProgress(pet,acao); const a=pet.ac
+  const add=(t,c)=>{ if(c&&!pet.tracos.includes(t)){pet.tracos.push(t);return t} }
+  return [
+    add('glutão',     (a.alimentar||0)>50),
+    add('guerreiro',  (a.treinar||0)>30),
+    add('brincalhão', (a.brincar||0)>40),
+    add('disciplinado',(a.treinar||0)>60&&pet.stats.mana>70),
+    add('carente',    (a.conversar||0)>100),
+    add('protetor',   (a.bat_v||0)>10),
+    add('amoroso',    ((a.carinho||0)+(a.beijar||0))>60),
+    add('aventureiro',(a.passeio||0)>20),
+    add('limpinho',   (a.banho||0)>15),
+  ].filter(Boolean)
+}
+
+function calcXPTotal(pet){ return pet.xpTotal||0 }
+
+function mem(pet,a,r){ pet.memoria=pet.memoria||[]; pet.memoria.push({a,r,t:Date.now()}); if(pet.memoria.length>20) pet.memoria=pet.memoria.slice(-20) }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §11 — BATALHA POR TURNOS
+// ══════════════════════════════════════════════════════════════════════════════
+function novaBat(uid1,uid2){ const id=`b${Date.now()}`, bat={id,status:'aguardando',p1:uid1,p2:uid2,hp1:100,hp2:100,mana1:60,mana2:60,shield1:0,shield2:0,veneno1:0,veneno2:0,stun1:0,stun2:0,espinhos1:0,espinhos2:0,vez:1,turno:1,log:[],ts:Date.now(),ultimoAtoTs:Date.now(),cd1:{},cd2:{}}; const b=getBatDB(); b[uid1]=id; b[uid2]=id; b[id]=bat; setBatDB(b); return bat }
+const getBatUser=uid=>{ const b=getBatDB(),id=b[uid]; return id?b[id]:null }
+function encerrarBat(bat){ const b=getBatDB(); delete b[bat.p1]; delete b[bat.p2]; delete b[bat.id]; setBatDB(b) }
+const tickCDs=cds=>Object.fromEntries(Object.entries(cds).map(([k,v])=>[k,Math.max(0,v-1)]).filter(([,v])=>v>0))
+
+function resolverAcao(uid,rawAcao,bat){
+  const isP1=bat.p1===uid,me=isP1?1:2,en=isP1?2:1
+  const [mhp,ehp,mmp,emp,msh,esh,mvn,evn,mstn,mcd]=[`hp${me}`,`hp${en}`,`mana${me}`,`mana${en}`,`shield${me}`,`shield${en}`,`veneno${me}`,`veneno${en}`,`stun${me}`,`cd${me}`]
+  const logs=[]
+  const acao=(rawAcao||'atacar').toLowerCase().trim()
+
+  // Stun
+  if(bat[mstn]>0){ bat[mstn]--; logs.push(`💫 ${acao} — atordoado! Perdeu o turno.`); bat.vez=en; bat.ultimoAtoTs=Date.now(); if(isP1) bat.cd1=tickCDs(bat.cd1); else bat.cd2=tickCDs(bat.cd2); return{logs,fim:false} }
+
+  // Veneno passivo
+  if(bat[mvn]>0){ bat[mhp]=Math.max(0,bat[mhp]-10); bat[mvn]--; logs.push(`☠️ Veneno: -10 vida (${bat[mvn]}t)`) }
+
+  // Espinhos passivo (reflete dano)
+  const espKey=`espinhos${me}`; let espinhosAtivo=bat[espKey]>0; if(espinhosAtivo) bat[espKey]--
+
+  let acaoStr=''
+  if(acao==='atacar'){
+    const base=~~(Math.random()*18)+12, dano=Math.max(0,base-bat[esh]); bat[esh]=Math.max(0,bat[esh]-base); bat[ehp]=Math.max(0,bat[ehp]-dano)
+    if(espinhosAtivo&&dano>0){ const ref=~~(dano*.5); bat[mhp]=Math.max(0,bat[mhp]-ref); acaoStr=`⚔️ -${dano} (espinhos devolveram ${ref}!)` }
+    else acaoStr=`⚔️ Atacou! -${dano}${base-dano>0?` (escudo -${base-dano})`:''}` 
+  } else if(acao==='defender'){
+    bat[msh]+=40; bat[mmp]=Math.max(0,bat[mmp]-10); acaoStr=`🛡️ +40 escudo`
+  } else if(acao==='curar'){
+    const c=22; bat[mhp]=Math.min(100,bat[mhp]+c); bat[mmp]=Math.max(0,bat[mmp]-12); acaoStr=`💚 +${c} vida (HP: ${~~bat[mhp]})`
+  } else if(acao.startsWith('poder ')){
+    const pid=acao.slice(6).trim(), p=POOL[pid]
+    if(!p){ const d=~~(Math.random()*12)+10; bat[ehp]=Math.max(0,bat[ehp]-d); acaoStr=`⚔️ Poder inválido → ataque básico: -${d}` }
+    else if(bat[mmp]<(p.mana||0)){ const d=~~(Math.random()*10)+8; bat[ehp]=Math.max(0,bat[ehp]-d); acaoStr=`❌ Sem mana (${p.mana}) → ataque básico: -${d}` }
+    else if((bat[mcd]||{})[pid]>0){ const d=~~(Math.random()*10)+8; bat[ehp]=Math.max(0,bat[ehp]-d); acaoStr=`⏳ ${p.nome} CD${bat[mcd][pid]}t → ataque: -${d}` }
+    else{
+      bat[mmp]-=p.mana||0; if(!bat[mcd]) bat[mcd]={}; bat[mcd][pid]=p.cd||0
+      let fx=`${p.emoji} *${p.nome}*! `
+      if(p.dano){ const d=Math.max(0,p.dano-bat[esh]); bat[esh]=Math.max(0,bat[esh]-p.dano); bat[ehp]=Math.max(0,bat[ehp]-d); fx+=`-${d} vida` }
+      if(p.cura){ bat[mhp]=Math.min(100,bat[mhp]+p.cura); fx+=`+${p.cura} vida` }
+      if(p.shield){ bat[msh]+=p.shield; fx+=`+${p.shield} escudo` }
+      if(p.efeito==='veneno3'){ bat[evn]=3; fx+=` ☠️ envenenou!` }
+      if(p.efeito==='veneno4'){ bat[evn]=4; fx+=` ☠️ veneno profundo!` }
+      if(p.efeito==='roubo_mana'){ const r=Math.min(25,bat[emp]); bat[emp]-=r; bat[mmp]=Math.min(100,bat[mmp]+r); fx+=` 💜 +${r} mana` }
+      if(p.efeito==='stun40'&&Math.random()<.4){ bat[`stun${en}`]=1; fx+=` 💫 inimigo atordoado!` }
+      if(p.efeito==='freeze30'&&Math.random()<.3){ bat[`stun${en}`]=1; fx+=` ❄️ congelado!` }
+      if(p.efeito==='drenar'){ const d=22; bat[ehp]=Math.max(0,bat[ehp]-d); bat[mhp]=Math.min(100,bat[mhp]+15); fx+=` drenando ${d}→+15` }
+      if(p.efeito==='break_shield'){ bat[esh]=~~(bat[esh]*.5); fx+=` 💢 escudo cortado` }
+      if(p.efeito==='corrode'){ bat[esh]=~~(bat[esh]*.5); fx+=` 🧪 escudo corroído` }
+      if(p.efeito==='espinhos2'){ bat[`espinhos${me}`]=2; fx+=` 🌵 espinhos ativados!` }
+      acaoStr=fx
+    }
+  } else if(acao==='fugir'){
+    if(Math.random()<.35){ return{logs:[...logs,'🏃 Fugiu da batalha!'],fim:true,vencedor:en,fugiu:uid} }
+    bat[mhp]=Math.max(0,bat[mhp]-12); acaoStr=`🏃 Tentou fugir mas falhou! -12 vida`
+  } else {
+    const d=~~(Math.random()*12)+10; bat[ehp]=Math.max(0,bat[ehp]-d); acaoStr=`⚔️ Ataque básico: -${d}`
+  }
+
+  logs.push(acaoStr)
+  if(isP1) bat.cd1=tickCDs(bat.cd1||{}); else bat.cd2=tickCDs(bat.cd2||{})
+  if(bat[ehp]<=0){ return{logs,fim:true,vencedor:me} }
+  bat.vez=en; bat.ultimoAtoTs=Date.now(); bat.turno++
+  bat.log=[...bat.log,...logs]; if(bat.log.length>30) bat.log=bat.log.slice(-30)
+  const bs=getBatDB(); bs[bat.id]=bat; setBatDB(bs)
+  return{logs,fim:false}
+}
+
+function hpBar(v){ const p=Math.round(clamp(v)/10), e=p>6?'🟩':p>3?'🟨':'🟥'; return e+Array(p).fill('█').join('')+Array(10-p).fill('░').join('')+` ${~~v}` }
+function manaBar(v){ const p=Math.round(clamp(v)/10); return '🔵'+Array(p).fill('▮').join('')+Array(10-p).fill('▯').join('')+` ${~~v}` }
+
+function batStatus(bat,uid){
+  const isP1=bat.p1===uid,me=isP1?1:2,en=isP1?2:1
+  const s=Math.max(0,~~((CFG.BAT_TURN_MS-(Date.now()-bat.ultimoAtoTs))/1000))
+  const meuP=getPet(isP1?bat.p1:bat.p2), enP=getPet(isP1?bat.p2:bat.p1)
+  const buffs=[],eBuffs=[]
+  if(bat[`shield${me}`]>0) buffs.push(`🛡️${~~bat[`shield${me}`]}`)
+  if(bat[`veneno${me}`]>0) buffs.push(`☠️${bat[`veneno${me}`]}t`)
+  if(bat[`espinhos${me}`]>0) buffs.push(`🌵${bat[`espinhos${me}`]}t`)
+  if(bat[`shield${en}`]>0) eBuffs.push(`🛡️${~~bat[`shield${en}`]}`)
+  if(bat[`veneno${en}`]>0) eBuffs.push(`☠️${bat[`veneno${en}`]}t`)
+  const b=buffs.length?' '+buffs.join(' '):''
+  const eb=eBuffs.length?' '+eBuffs.join(' '):''
+  return [
+    `╠═══ ⚔️ BATALHA — Turno ${bat.turno} ════════╣`,
+    `║`,
+    `║ 🔴 *${meuP?.nome||'Você'}*${b}`,
+    `║ HP   ${hpBar(bat[`hp${me}`])}`,
+    `║ MANA ${manaBar(bat[`mana${me}`])}`,
+    `║`,
+    `║          ⚔️  VS  ⚔️`,
+    `║`,
+    `║ 💀 *${enP?.nome||'Inimigo'}*${eb}`,
+    `║ HP   ${hpBar(bat[`hp${en}`])}`,
+    `║ MANA ${manaBar(bat[`mana${en}`])}`,
+    `║`,
+    `╠═══════════════════════════════════════╣`,
+    `║ ⏱️ ${s}s  —  SUA VEZ!`,
+    `╠═══════════════════════════════════════╣`,
+    `║ 1️⃣  *.pet turno atacar*`,
+    `║ 2️⃣  *.pet turno defender*  (+escudo)`,
+    `║ 3️⃣  *.pet turno curar*     (+HP)`,
+    `║ 4️⃣  *.pet turno poder <id>*`,
+    `║ 5️⃣  *.pet turno fugir*`,
+    `╚═══════════════════════════════════════╝`,
+    `_use *.pet poderes* para ver seus poderes_`,
+  ].join('\n')
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §12 — EVENTOS
+// ══════════════════════════════════════════════════════════════════════════════
+const EVIND=[
+  {id:'moedas', e:'💰',t:'Chuva de Moedas!',       c:.15,ok:p=>p.stats.felicidade>50,fn:p=>{ const v=~~(Math.random()*120)+50;p.economia.moedas+=v;return`+${v} moedas` }},
+  {id:'mana_s', e:'✨',t:'Insight Místico',         c:.10,ok:p=>p.stats.sono>60,      fn:p=>{ p.stats.mana=clamp(p.stats.mana+40);return'+40 mana' }},
+  {id:'pres',   e:'🎁',t:'Presente Misterioso!',    c:.08,ok:p=>p.stats.felicidade>70,fn:p=>{ const l=['bolinha','pocao_vida','ração','pelúcia'];const i=l[~~(Math.random()*l.length)];p.economia.inventario.push(i);return`ganhou ${ITENS[i]?.nome}` }},
+  {id:'treino', e:'⚡',t:'Treino Espiritual!',       c:.08,ok:p=>p.stats.energia>60&&p.stats.mana<60,fn:p=>{ p.stats.mana=clamp(p.stats.mana+50);p.stats.energia=clamp(p.stats.energia-10);return'+50 mana -10 energia' }},
+  {id:'festa',  e:'🎉',t:'Seu pet achou uma festa!',c:.07,ok:p=>p.stats.fome<70,      fn:p=>{ p.stats.fome=100;p.stats.felicidade=clamp(p.stats.felicidade+30);return'fome 100% +30 felicidade' }},
+  {id:'amigo',  e:'🤝',t:'Pet fez um amigo!',       c:.06,ok:p=>p.stats.felicidade>60,fn:p=>{ p.stats.felicidade=clamp(p.stats.felicidade+20);p.economia.moedas+=40;return'+20 felicidade +40 moedas' }},
+  {id:'nivel_x',e:'⭐',t:'Treino intenso!',          c:.10,ok:()=>true,               fn:p=>{ const xp=~~(Math.random()*30)+20;p.xpTotal=(p.xpTotal||0)+xp;return`+${xp} XP!` }},
+  {id:'ataque', e:'⚔️',t:'Ataque de Rival!',        c:.12,ok:p=>p.stats.vida>30,      fn:p=>{ if(p.economia.inventario.includes('amuleto')){p.economia.inventario.splice(p.economia.inventario.indexOf('amuleto'),1);return'🔰 Amuleto bloqueou!'}const d=~~(Math.random()*20)+10;p.stats.vida=clamp(p.stats.vida-d);return`-${d} vida` }},
+  {id:'doença', e:'🤒',t:'Ficou Doente!',            c:.08,ok:p=>p.stats.vida<70,      fn:p=>{ p.status_temp='doente';p.stats.energia=clamp(p.stats.energia-30);p.stats.vida=clamp(p.stats.vida-10);return'-30 energia -10 vida' }},
+  {id:'roubo',  e:'🦹',t:'Foi Roubado!',             c:.06,ok:p=>p.economia.moedas>100&&p.stats.felicidade<40,fn:p=>{ const v=~~(p.economia.moedas*.2);p.economia.moedas-=v;return`-${v} moedas` }},
+  {id:'sonho',  e:'💭',t:'Sonho Profético',          c:.10,ok:()=>true,               fn:p=>{ p.stats.humor=clamp(calcH(p)+15);return'+15 humor misterioso' }},
+  {id:'cristal',e:'🌀',t:'⚠️ RARO! Cristal Dimensional!',c:.02,ok:p=>p.evolucao.estagio>=2,fn:p=>{ p.economia.inventario.push('runa_lend');p.stats.mana=100;if(!p.tracos.includes('abençoado'))p.tracos.push('abençoado');return'Runa Lendária + traço abençoado!' }},
+  {id:'ancião', e:'🧙',t:'⚠️ RARO! Visita da Anciã!',c:.015,ok:p=>p.evolucao.estagio>=1,fn:p=>{ ['vida','fome','sono','felicidade','energia','mana'].forEach(k=>p.stats[k]=clamp(p.stats[k]+20));return'+20 em tudo!' }},
+]
+async function sortearEv(pet,uid){ if(Math.random()>.15) return null; const ps=EVIND.filter(e=>e.ok(pet)&&Math.random()<e.c*3); if(!ps.length) return null; const ev=ps[~~(Math.random()*ps.length)],d=ev.fn(pet); mem(pet,'evento',`${ev.t}: ${d}`); setPet(uid,pet); return `\n\n━━━━━━━━━━━━━━━━\n${ev.e} *${ev.t}*\n_${d}_` }
+
+const EVGLOB=[
+  {id:'lua',  e:'🌕',t:'Lua Cheia!',         dur:2*3600000,fn:p=>{ p.stats.mana=clamp(p.stats.mana+35);return'+35 mana' }},
+  {id:'tmp',  e:'⛈️',t:'Tempestade!',         dur:3*3600000,fn:p=>{ p.stats.energia=clamp(p.stats.energia-20);return'-20 energia' }},
+  {id:'fest', e:'🎊',t:'Festival!',           dur:4*3600000,fn:p=>{ p.economia.moedas+=100;return'+100 moedas' }},
+  {id:'chuva',e:'🌠',t:'Chuva de Estrelas!',  dur:2*3600000,fn:p=>{ const l=['pocao_vida','pocao_mana','bolinha'];const i=l[~~(Math.random()*l.length)];p.economia.inventario.push(i);return`ganhou ${ITENS[i]?.nome}` }},
+  {id:'praga',e:'🦠',t:'Praga!',              dur:3*3600000,fn:p=>{ if(p.stats.fome<50){p.status_temp='doente';return'ficou doente'}return'imune (fome ok)' }},
+  {id:'ecl',  e:'🌑',t:'Eclipse Raro!',       dur:1*3600000,fn:p=>{ p.stats.mana=100;if(!p.tracos.includes('filho_eclipse'))p.tracos.push('filho_eclipse');return'Mana 100% + traço especial' }},
+  {id:'benc', e:'✨',t:'Bênção Global!',       dur:2*3600000,fn:p=>{ p.stats.vida=clamp(p.stats.vida+30);p.stats.felicidade=clamp(p.stats.felicidade+30);return'+30 vida +30 felicidade' }},
+  {id:'inv',  e:'👾',t:'Invasão de Criaturas!',dur:3*3600000,fn:p=>{ if(p.tracos.some(t=>['guerreiro','protetor'].includes(t))){p.economia.moedas+=200;return'+200 moedas (herói!)'}p.stats.vida=clamp(p.stats.vida-15);return'-15 vida' }},
+]
+function checkGEv(uid,pet){
+  const now=Date.now(), raw=getGEvDB().filter(e=>now<e.ts+e.dur)
+  setGEvDB(raw)
+  const msgs=[]
+  for(const stored of raw){
+    if((stored.ap||[]).includes(uid)) continue
+    const def=EVGLOB.find(x=>x.id===stored.id)
+    if(!def) continue
+    stored.ap=stored.ap||[]; stored.ap.push(uid)
+    const d=def.fn(pet)
+    msgs.push(`\n🌍 *EVENTO GLOBAL — ${def.t}*\n${def.e} _${d}_`)
+  }
+  if(msgs.length){ setGEvDB(raw); setPet(uid,pet) }
+  return msgs.join('')
+}
+function tryGlobEv(){
+  const now=Date.now(), raw=getGEvDB().filter(e=>now<e.ts+e.dur)
+  if(raw.length||Math.random()>.12) return null
+  const def=EVGLOB[~~(Math.random()*EVGLOB.length)]
+  const stored={id:def.id,ts:now,dur:def.dur,ap:[]}
+  setGEvDB([...raw,stored])
+  console.log(`[SP] 🌍 Evento global: ${def.t}`)
+  return def
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §13 — HELPERS
+// ══════════════════════════════════════════════════════════════════════════════
+function buscar(uid){ const r=getPet(uid); if(!r) return{err:'❌ Sem pet! *.pet criar <nome> <personalidade>*'}; const p=decay(r); if(p.status==='quebrado') return{err:`💔 *${p.nome}* em colapso. *.pet recuperar*`}; if(p.status==='fugiu'){setPet(uid,p);return{err:`🏃 *${p.nome}* fugiu. *.pet recuperar* (100💰+Poção)`}}; return{pet:p} }
+
+async function envCard(ctx3,pet,uid,extra=''){
+  const{sock,from,msg}=ctx3
+  try{
+    const buf=await renderCard(pet,uid),hi=getHI(pet.stats.humor)
+    const nl=calcNivel(pet.xpTotal||0)
+    const tier=getTier(nl.lvl)
+    const leg=(extra?extra+'\n':'')+`${tier.emoji} *${pet.nome}* LVL${nl.lvl} • ${pet.evolucao?.forma||'Ovo'} ${hi.emoji}`
+    await sock.sendMessage(from,{image:buf,caption:leg,mimetype:'image/png'},{quoted:msg})
+  }catch(e){ console.error('[SP canvas]',e); await ctx3.reply(`❌ Canvas: ${e.message}\n*.pet perfil* pra ver texto.`) }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §14 — AJUDA REFORMULADA (curta e amigável)
+// ══════════════════════════════════════════════════════════════════════════════
+const HELP = {
+  '': `🐾 *Bem-vindo ao SoulPet!*
+━━━━━━━━━━━━━━━━━━━━
+Seu bichinho tem personalidade única gerada por IA, envelhece, fica feliz, bravo, evolui... e às vezes te ignora mesmo! 😤
+
+*Primeiro passo:*
+*.pet criar Umbra sombrio e misterioso*
+
+*Depois use esses atalhos:*
+🍖 *.alimentar*  🎯 *.brincar*  ⚔️ *.treinar*
+💤 *.dormir*  ☀️ *.acordar*  🤗 *.carinho*
+😘 *.beijar*  🚶 *.passeio*  🛁 *.banho*
+
+*Ver tudo:*  *.pet*   *Falar com ele:*  *.pet Oi Umbra!*
+*Ranking:*  *.petrank*   *Perfil:*  *.perfil*
+━━━━━━━━━━━━━━━━━━━━
+*.pet ajuda <tópico>*
+Tópicos: batalha • poderes • loja • ia • evoluir`,
+
+  'batalha': `⚔️ *BATALHA POR TURNOS*
+━━━━━━━━━━━━━━━━━━━━
+*.pet batalha @alguém* — desafia
+*.pet aceitar* / *.pet recusar*
+*.pet turno atacar* — ataque básico
+*.pet turno defender* — +40 escudo (-10 mana)
+*.pet turno curar* — +22 HP (-12 mana)
+*.pet turno poder <id>* — poder especial
+*.pet turno fugir* — 35% de chance
+*.pet situação* — ver HP/mana atual
+*Se não responder em 35s → IA age por você!*`,
+
+  'poderes': `✨ *PODERES*
+━━━━━━━━━━━━━━━━━━━━
+*.pet poderes* — seus poderes atuais
+Desbloqueados por: estágio + traços + espécie
+Tipos: ⚔️Ataque 🛡️Defesa 💚Cura 🌀Especial 💥Ultimate
+Estágio 2: especiais | Estágio 3: ultimate`,
+
+  'loja': `💰 *LOJA*
+━━━━━━━━━━━━━━━━━━━━
+*.pet loja*  *.pet comprar <item>*
+*.pet usar <item>*  *.inv*
+Ganho: alimentar+5 brincar+8 treinar+10 passeio+15
+carinho+6 banho+8 batalha+20-100`,
+
+  'ia': `🤖 *CONFIGURAR IA*
+━━━━━━━━━━━━━━━━━━━━
+*.pet config groq <key>* — Groq gratuito
+Site: console.groq.com (crie conta e pegue a key)
+*.pet config ver* — qual IA está ativa
+*.pet config limpar* — remove configuração
+Sem IA: respostas automáticas (funciona, mas sem alma 😅)`,
+
+  'evoluir': `🌟 *EVOLUÇÕES*
+━━━━━━━━━━━━━━━━━━━━
+🥚 Ovo → 🐣 Filhote: 1 dia
+🐣 → 🌿🌑 Jovem: 7 dias (depende da felicidade)
+🌿 → ✨👑⚡ Adulto: 30 dias (depende de TUDO)
+Tiers: Filhote→Novato→Guerreiro→Campeão→Lendário→Imortal→Deus`,
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §15 — COMANDO PRINCIPAL .pet
+// ══════════════════════════════════════════════════════════════════════════════
+export const cmdPet = {
+  name:'pet', aliases:['soulpet','sp'],
+  description:'🐾 Pet virtual com IA', category:'rpg', cooldown:3,
+
+  async execute(ctx3){
+    const{reply,args,userId,usuario,react,isOwner,isSubdono,sock,msg,from}=ctx3
+    const sub=(args[0]||'').toLowerCase()
+
+    // ── AJUDA ─────────────────────────────────────────────────────────────────
+    if(['ajuda','help','?'].includes(sub)) return reply(HELP[(args[1]||'').toLowerCase()]||HELP[''])
+
+    // ── CONFIG IA ─────────────────────────────────────────────────────────────
+    if(sub==='config'){
+      if(!isOwner&&!isSubdono) return reply('🔒 Só o dono pode configurar.')
+      const a=(args[1]||'').toLowerCase(), v=args.slice(2).join('').trim()
+      if(a==='groq'){
+        if(!v) return reply('❌ *.pet config groq <sua_key_aqui>*\nConsiga em: console.groq.com')
+        setCfg({groq_key:v}); return reply('✅ *Groq configurado!*\nTeste com *.pet conversar oi*')
+      }
+      if(a==='ver'){ const c=getCfg(); return reply(`⚙️ *IA Ativa:* ${c.groq_key?'🟢 Groq (llama-3.1-8b-instant)':process.env.ANTHROPIC_API_KEY?'🟢 Anthropic (claude)':'⚪ Nenhuma — configure com *.pet config groq <key>*'}`) }
+      if(a==='limpar'){ setCfg({groq_key:''}); return reply('🗑️ Keys removidas.') }
+      return reply(HELP['ia'])
+    }
+
+    // ── CRIAR ─────────────────────────────────────────────────────────────────
+    if(sub==='criar'){
+      if(getPet(userId)) return reply('❌ Você já tem um pet! *.pet* pra ver.')
+      const nome=args[1], base=args.slice(2).join(' ')
+      if(!nome||!base) return reply('❌ *.pet criar <nome> <personalidade>*\nEx: *.pet criar Umbra sombrio e misterioso*')
+      await react('🥚'); await reply(`✨ Gerando alma de *${nome}*... (a IA está pensando!)`)
+      const pers=await iaCriarPers(nome,base)
+      const novo={nome,dono:usuario,donoId:userId,personalidade:pers,
+        tracos:[...(pers.tracos_iniciais||[])],
+        stats:{vida:100,fome:80,sono:70,felicidade:75,energia:80,mana:30,humor:75},
+        evolucao:{estagio:0,forma:'Ovo',hist:[]},
+        economia:{moedas:100,inventario:['ração','ração','bolinha']},
+        social:{interacoes:0},memoria:[],ac:{},histFel:[75],xpTotal:0,
+        status:'vivo',dormindo:false,status_temp:null,
+        ultimaInteracao:Date.now(),criadoEm:Date.now()}
+      setPet(userId,novo)
+      return reply(`🥚 *PET CRIADO!*\n\n🌟 *${nome}*\n🐾 ${pers.especie}\n📖 ${pers.descricao}\n\n💬 _"${pers.frase_marca}"_\n\n💰 100 moedas  🎒 2× Ração + Bolinha\nNível 0 — comece a interagir para subir!\n\n_Use *.pet* para ver o card visual!_\n_Atalhos: .alimentar .brincar .treinar .carinho .beijar_`)
+    }
+
+    // ── STATUS / CARD ─────────────────────────────────────────────────────────
+    if(sub===''||sub==='status'){
+      const{pet,err}=buscar(userId); if(err) return reply(err)
+      const evoMsg=tentarEvo(pet), gev=checkGEv(userId,pet)
+      pet.social=pet.social||{}; pet.social.interacoes=(pet.social.interacoes||0)+1
+      ganharXP(pet,2); tryGlobEv()
+      setPet(userId,pet); await react('🐾')
+      await envCard(ctx3,pet,userId,(evoMsg?`🎉 ${evoMsg}`:'')+(gev||''))
+      return
+    }
+
+    // ── FOTO (dono por número do petlist) ─────────────────────────────────────
+    if(sub==='foto'){
+      if(!isOwner&&!isSubdono) return reply('🔒 Só o dono pode cadastrar fotos.')
+      if((args[1]||'').toLowerCase()==='listar') return cmdPetList.execute(ctx3)
+      const n=parseInt(args[1]), estado=(args[2]||'').toLowerCase()
+      if(isNaN(n)||n<1) return reply('❌ *.pet foto <nº> <estado>*\nUse *.petlist* pra ver os números.')
+      if(!estado||!CFG.ESTADOS.includes(estado)) return reply(`❌ Estados: ${CFG.ESTADOS.join(', ')}`)
+      if(!_petlistCache.length) return reply('❌ Use *.petlist* primeiro!')
+      const entry=_petlistCache.find(x=>x.n===n); if(!entry) return reply(`❌ Pet nº${n} não encontrado.`)
+      const petAlvo=getPet(entry.uid); if(!petAlvo) return reply('❌ Pet não encontrado.')
+      const imgData=extrairImg(msg)
+      if(!imgData) return reply('❌ Envie a imagem com o comando na legenda, ou responda uma imagem.')
+      await react('⬆️'); await reply(`📥 Salvando foto de *${petAlvo.nome}* — \`${estado}\`...`)
+      try{
+        const buf=await baixarImg(imgData.obj,sock)
+        const dest=join(CFG.CHARS,entry.uid); ensureDir(dest)
+        const mime=imgData.img.mimetype||'image/png', extMap={'image/png':'png','image/jpeg':'jpg','image/jpg':'jpg','image/webp':'webp'}
+        const ext=extMap[mime]||'png'
+        for(const e of ['png','jpg','jpeg','webp']){ const old=join(dest,`${estado}.${e}`); if(existsSync(old)) try{unlinkSync(old)}catch{} }
+        writeFileSync(join(dest,`${estado}.${ext}`),buf)
+        try{
+          const pD=decay({...petAlvo}), cardBuf=await renderCard(pD,entry.uid)
+          await sock.sendMessage(from,{image:cardBuf,caption:`✅ *${petAlvo.nome}* (nº${n}) — foto \`${estado}\` salva!\nDono: ${petAlvo.dono}`,mimetype:'image/png'},{quoted:msg})
+        }catch{ await reply(`✅ Foto de *${petAlvo.nome}* (nº${n}) salva para \`${estado}.${ext}\`!`) }
+      }catch(e){ await reply(`❌ Erro: ${e.message}`) }
+      return
+    }
+
+    // ── ALIMENTAR ─────────────────────────────────────────────────────────────
+    if(sub==='alimentar'||sub==='comer'){
+      const{pet,err}=buscar(userId); if(err) return reply(err)
+      if(pet.dormindo) return reply(`💤 Acorda *${pet.nome}* primeiro! *.acordar*`)
+      if(pet.stats.fome>90) return reply(`🤔 *${pet.nome}* não tá com fome agora.`)
+      const idx=pet.economia.inventario.findIndex(i=>ITENS[i]?.t==='comida')
+      let iid,it
+      if(idx>=0){iid=pet.economia.inventario[idx];it=ITENS[iid];pet.economia.inventario.splice(idx,1)}
+      else if(pet.economia.moedas>=20){iid='ração';it=ITENS['ração'];pet.economia.moedas-=20}
+      else return reply(`😢 *${pet.nome}* tá com fome e sem moedas!\n*.pet comprar ração*`)
+      for(const[k,v] of Object.entries(it.ef)) if(pet.stats[k]!==undefined) pet.stats[k]=clamp(pet.stats[k]+v)
+      const lv=ganharXP(pet,5), nt=doTracos(pet,'alimentar'), ev=await sortearEv(pet,userId), gev=checkGEv(userId,pet)
+      const fala=await iaFala(pet,`foi alimentado com ${it.nome}`,`dono deu ${it.nome}`)
+      mem(pet,'alimentar',`recebeu ${it.nome}`); pet.economia.moedas+=5; const em=tentarEvo(pet); setPet(userId,pet)
+      await envCard(ctx3,pet,userId,`${it.e} *${pet.nome}* comeu *${it.nome}*!\n💬 _${fala}_\n+5💰 +5XP`+(lv?`\n🎉 *LEVEL UP! → LVL ${lv}*`:'')+(nt.length?`\n✨ Traço: ${nt.join(', ')}`:'')+((em?`\n🎉 ${em}`:''+(ev||'')+(gev||''))))
+      return
+    }
+
+    // ── CARINHO ───────────────────────────────────────────────────────────────
+    if(sub==='carinho'){
+      const{pet,err}=buscar(userId); if(err) return reply(err)
+      if(pet.dormindo) return reply(`💤 *${pet.nome}* tá dormindo, não acorda pra carinho não 😪`)
+      const boost=pet.economia.inventario.includes('perfume')
+      if(boost){ pet.economia.inventario.splice(pet.economia.inventario.indexOf('perfume'),1) }
+      const fel=boost?30:15, hum=boost?20:10
+      pet.stats.felicidade=clamp(pet.stats.felicidade+fel); pet.stats.humor=clamp(calcH(pet)+hum); pet.stats.energia=clamp(pet.stats.energia-5); pet.economia.moedas+=6
+      const lv=ganharXP(pet,6), nt=doTracos(pet,'carinho'), ev=await sortearEv(pet,userId), gev=checkGEv(userId,pet)
+      const fala=await iaFala(pet,`recebendo carinho do dono${boost?' com perfume':''}`,'dono fez carinho')
+      mem(pet,'carinho',`carinho${boost?' (com perfume)':''}`); const em=tentarEvo(pet); setPet(userId,pet)
+      await envCard(ctx3,pet,userId,`🤗 Você fez carinho em *${pet.nome}*!\n💬 _${fala}_\n+6💰 +6XP`+(boost?'\n(Perfume Místico! bônus duplo ✨)':'')+(lv?`\n🎉 LVL ${lv}!`:'')+(nt.length?`\n✨ Traço: ${nt.join(', ')}`:'')+((em?`\n🎉 ${em}`:''+(ev||'')+(gev||''))))
+      return
+    }
+
+    // ── BEIJAR ────────────────────────────────────────────────────────────────
+    if(sub==='beijar'){
+      const{pet,err}=buscar(userId); if(err) return reply(err)
+      if(pet.dormindo) return reply(`💤 Nem tente, ele tá dormindo 😴`)
+      if(pet.stats.humor<25) return reply(`😤 *${pet.nome}* tá bravo demais pra isso. Faça carinho primeiro!`)
+      pet.stats.felicidade=clamp(pet.stats.felicidade+22); pet.stats.humor=clamp(calcH(pet)+18); pet.economia.moedas+=4
+      const lv=ganharXP(pet,4), nt=doTracos(pet,'beijar'), ev=await sortearEv(pet,userId)
+      const fala=await iaFala(pet,'dono deu um beijinho','beijou o pet')
+      mem(pet,'beijar','dono beijou'); const em=tentarEvo(pet); setPet(userId,pet)
+      await envCard(ctx3,pet,userId,`😘 Você beijou *${pet.nome}*!\n💬 _${fala}_\n+4💰 +4XP`+(lv?`\n🎉 LVL ${lv}!`:'')+(nt.length?`\n✨ Traço: ${nt.join(', ')}`:'')+((em?`\n🎉 ${em}`:''+(ev||''))))
+      return
+    }
+
+    // ── PASSEIO ───────────────────────────────────────────────────────────────
+    if(sub==='passeio'){
+      const{pet,err}=buscar(userId); if(err) return reply(err)
+      if(pet.dormindo) return reply(`💤 Acorda ele primeiro!`)
+      if(pet.stats.energia<15) return reply(`😓 *${pet.nome}* tá sem energia pra passear!`)
+      pet.stats.energia=clamp(pet.stats.energia-15); pet.stats.fome=clamp(pet.stats.fome-10)
+      pet.stats.felicidade=clamp(pet.stats.felicidade+20); pet.stats.sono=clamp(pet.stats.sono-10)
+      // Loot aleatório do passeio
+      const lootRoll=Math.random(); let lootMsg=''
+      if(lootRoll<.2){ const moedas=~~(Math.random()*80)+30; pet.economia.moedas+=moedas; lootMsg=`\n💰 Achou ${moedas} moedas no caminho!` }
+      else if(lootRoll<.35){ const itm=['ração','bolinha','pocao_vida'][~~(Math.random()*3)]; pet.economia.inventario.push(itm); lootMsg=`\n🎁 Achou ${ITENS[itm]?.nome} no caminho!` }
+      pet.economia.moedas+=15
+      const lv=ganharXP(pet,12), nt=doTracos(pet,'passeio'), ev=await sortearEv(pet,userId), gev=checkGEv(userId,pet)
+      const fala=await iaFala(pet,'acabou de voltar do passeio','dono levou passear')
+      mem(pet,'passeio','foi passear'); const em=tentarEvo(pet); setPet(userId,pet)
+      await envCard(ctx3,pet,userId,`🚶 *${pet.nome}* foi passear!\n💬 _${fala}_${lootMsg}\n+15💰 +12XP`+(lv?`\n🎉 LVL ${lv}!`:'')+(nt.length?`\n✨ Traço: ${nt.join(', ')}`:'')+((em?`\n🎉 ${em}`:''+(ev||'')+(gev||''))))
+      return
+    }
+
+    // ── BANHO ─────────────────────────────────────────────────────────────────
+    if(sub==='banho'){
+      const{pet,err}=buscar(userId); if(err) return reply(err)
+      if(pet.dormindo) return reply(`💤 Acorda ele antes do banho!`)
+      const curou=pet.status_temp==='doente'
+      if(curou){ pet.status_temp=null }
+      pet.stats.felicidade=clamp(pet.stats.felicidade+12); pet.stats.humor=clamp(calcH(pet)+10); pet.economia.moedas+=8
+      const lv=ganharXP(pet,8), nt=doTracos(pet,'banho'), ev=await sortearEv(pet,userId)
+      const fala=await iaFala(pet,`tomando banho${curou?' (curou a doença)':''}`,`dono deu banho${curou?' curativo':''}`)
+      mem(pet,'banho',`tomou banho${curou?' (curou doença)':''}`); const em=tentarEvo(pet); setPet(userId,pet)
+      await envCard(ctx3,pet,userId,`🛁 *${pet.nome}* tomou banho!\n💬 _${fala}_${curou?'\n🎉 Doença curada pelo banho!':''}\n+8💰 +8XP`+(lv?`\n🎉 LVL ${lv}!`:'')+(nt.length?`\n✨ Traço: ${nt.join(', ')}`:'')+((em?`\n🎉 ${em}`:''+(ev||''))))
+      return
+    }
+
+    // ── DORMIR ────────────────────────────────────────────────────────────────
+    if(sub==='dormir'){const{pet,err}=buscar(userId);if(err)return reply(err);if(pet.dormindo)return reply(`💤 *${pet.nome}* já tá dormindo!`);if(pet.stats.sono>90)return reply(`🤔 Não tá cansado ainda.`);pet.dormindo=true;mem(pet,'dormir','dormiu');setPet(userId,pet);return reply(`💤 *${pet.nome}* foi dormir!\nMana +2/h, Energia +3/h, Sono +4/h\nUse *.acordar* pra despertar.`)}
+
+    // ── ACORDAR ───────────────────────────────────────────────────────────────
+    if(sub==='acordar'){const{pet,err}=buscar(userId);if(err)return reply(err);if(!pet.dormindo)return reply(`👀 *${pet.nome}* já tá acordado!`);pet.dormindo=false;const fala=await iaFala(pet,'acabou de ser acordado','dono acordou ele');mem(pet,'acordar','acordou');setPet(userId,pet);return reply(`☀️ *${pet.nome}* acordou!\n💬 _${fala}_`)}
+
+    // ── BRINCAR ───────────────────────────────────────────────────────────────
+    if(sub==='brincar'||sub==='jogar'){
+      const{pet,err}=buscar(userId);if(err)return reply(err)
+      if(pet.dormindo)return reply(`💤 Acorda *${pet.nome}* primeiro!`)
+      if(pet.stats.energia<10)return reply(`😓 Sem energia!`)
+      const temB=pet.economia.inventario.some(i=>ITENS[i]?.t==='brinquedo'), bonus=temB?22:13
+      pet.stats.felicidade=clamp(pet.stats.felicidade+bonus); pet.stats.energia=clamp(pet.stats.energia-15); pet.stats.fome=clamp(pet.stats.fome-5); pet.economia.moedas+=8
+      const lv=ganharXP(pet,8), nt=doTracos(pet,'brincar'), ev=await sortearEv(pet,userId), gev=checkGEv(userId,pet)
+      const fala=await iaFala(pet,'brincando animado','dono brincou'); mem(pet,'brincar','brincou'); const em=tentarEvo(pet); setPet(userId,pet)
+      await envCard(ctx3,pet,userId,`🎯 Brincou com *${pet.nome}*!\n💬 _${fala}_\n+8💰 +8XP`+(lv?`\n🎉 LVL ${lv}!`:'')+(nt.length?`\n✨ Traço: ${nt.join(', ')}`:'')+((em?`\n🎉 ${em}`:''+(ev||'')+(gev||''))))
+      return
+    }
+
+    // ── TREINAR ───────────────────────────────────────────────────────────────
+    if(sub==='treinar'||sub==='treino'){
+      const{pet,err}=buscar(userId);if(err)return reply(err)
+      if(pet.dormindo)return reply(`💤 Acorda primeiro!`)
+      if(pet.stats.energia<20)return reply(`😓 Sem energia pra treinar!`)
+      if(pet.stats.mana>=95)return reply(`✨ Mana cheia! Usa em batalha primeiro.`)
+      const r=Math.random(),[mana,lbl]=r>.85?[28,'⚡ *Excepcional!*']:r>.30?[14,'✅ Normal']:[5,'⚠️ Difícil']
+      pet.stats.mana=clamp(pet.stats.mana+mana); pet.stats.energia=clamp(pet.stats.energia-20); pet.stats.fome=clamp(pet.stats.fome-8); pet.economia.moedas+=10
+      const lv=ganharXP(pet,10), nt=doTracos(pet,'treinar'), ev=await sortearEv(pet,userId), gev=checkGEv(userId,pet)
+      const fala=await iaFala(pet,'cansado depois do treino','treino intenso'); mem(pet,'treinar',`+${mana} mana`); const em=tentarEvo(pet); setPet(userId,pet)
+      await envCard(ctx3,pet,userId,`⚔️ *${pet.nome}* treinou! ${lbl}\n+${mana} mana | +10💰 +10XP\n💬 _${fala}_`+(lv?`\n🎉 LVL ${lv}!`:'')+(nt.length?`\n✨ Traço: ${nt.join(', ')}`:'')+((em?`\n🎉 ${em}`:''+(ev||'')+(gev||''))))
+      return
+    }
+
+    // ── CONVERSAR ─────────────────────────────────────────────────────────────
+    if(sub==='conversar'||sub==='falar'){
+      const{pet,err}=buscar(userId);if(err)return reply(err)
+      const mensagem=args.slice(1).join(' ');if(!mensagem)return reply('❌ *.pet conversar <mensagem>*')
+      pet.stats.felicidade=clamp(pet.stats.felicidade+5); pet.economia.moedas+=3
+      const lv=ganharXP(pet,3), nt=doTracos(pet,'conversar'), gev=checkGEv(userId,pet)
+      const fala=await iaFala(pet,`dono disse: "${mensagem}"`,mensagem)
+      mem(pet,'conversar',`"${mensagem.slice(0,50)}"`); setPet(userId,pet)
+      return reply(`💬 *${pet.nome}:*\n_${fala}_\n+3💰 +3XP`+(lv?`\n🎉 LVL ${lv}!`:'')+(nt.length?`\n✨ Traço: ${nt.join(', ')}`:''+(gev||'')))
+    }
+
+    // ── PODERES ───────────────────────────────────────────────────────────────
+    if(sub==='poderes'||sub==='poder'){
+      const{pet,err}=buscar(userId);if(err)return reply(err)
+      const ps=getPoderes(pet); if(!ps.length) return reply(`🥚 *${pet.nome}* ainda não tem poderes. Evolua!`)
+      const tipos={atk:'⚔️',def:'🛡️',heal:'💚',spc:'🌀',ult:'💥'}
+      let txt=`✨ *Poderes de ${pet.nome}*\n🔵 Mana atual: ${~~pet.stats.mana}\n━━━━━━━━━━━━━━━━━━\n\n`
+      for(const p of ps) txt+=`${p.emoji} *${p.nome}* (\`${p.id}\`) ${tipos[p.tipo]||'—'}\n💙${p.mana} mana • CD:${p.cd}t\n_${p.desc}_\n\n`
+      txt+=`Em batalha: *.pet turno poder <id>*`
+      return reply(txt)
+    }
+
+    // ── BATALHA ───────────────────────────────────────────────────────────────
+    if(sub==='batalha'||sub==='desafiar'){
+      const{pet:meu,err}=buscar(userId);if(err)return reply(err)
+      if(meu.dormindo)return reply(`💤 Acorda *${meu.nome}* primeiro!`)
+      if(meu.stats.energia<20)return reply('😓 Sem energia para batalhar!')
+      if(getBatUser(userId))return reply('⚔️ Você já está em batalha! *.pet situação*')
+      const rid=msg?.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0]
+      if(!rid)return reply('❌ *.pet batalha @alguém*')
+      const rival=getPet(rid);if(!rival||rival.status!=='vivo')return reply('❌ Pet rival indisponível.')
+      if(getBatUser(rid))return reply('❌ Esse pet já está em batalha.')
+      const bat=novaBat(userId,rid)
+      await sock.sendMessage(from,{text:`⚔️ *${meu.nome}* desafia *${rival.nome}*!\n\n@${rid.split('@')[0]}, aceita?\n*.pet aceitar* | *.pet recusar*\n_(60s para responder)_`,mentions:[rid]},{quoted:msg})
+      return
+    }
+
+    if(sub==='aceitar'){
+      const{pet,err}=buscar(userId);if(err)return reply(err)
+      const bats=getBatDB(), bat=Object.values(bats).find(b=>b?.p2===userId&&b?.status==='aguardando'&&typeof b.id==='string')
+      if(!bat)return reply('❌ Nenhum desafio pendente.')
+      if(Date.now()-bat.ts>CFG.BAT_ACEITE_MS){encerrarBat(bat);return reply('❌ Desafio expirou.')}
+      bat.status='ativo';bat.vez=1;bat.ultimoAtoTs=Date.now();bats[bat.id]=bat;setBatDB(bats)
+      const p1=getPet(bat.p1)
+      await sock.sendMessage(from,{text:`🔥 *BATALHA INICIADA!*\n\n⚔️ *${p1?.nome||'?'}* VS *${pet.nome}*\n\n@${bat.p1.split('@')[0]} — sua vez! Turno 1\nHP: 100 | Mana: 60\n*.pet turno atacar* ou *.pet poderes*`,mentions:[bat.p1]},{quoted:msg})
+      return
+    }
+
+    if(sub==='recusar'){
+      const bats=getBatDB(), bat=Object.values(bats).find(b=>b?.p2===userId&&b?.status==='aguardando'&&typeof b.id==='string')
+      if(!bat)return reply('❌ Nenhum desafio.')
+      const p1=getPet(bat.p1); encerrarBat(bat)
+      return reply(`❌ *${getPet(userId)?.nome||'?'}* recusou o duelo de *${p1?.nome||'?'}*.`)
+    }
+
+    if(sub==='situação'||sub==='situacao'||sub==='bat'){
+      const bat=getBatUser(userId);if(!bat||bat.status!=='ativo')return reply('❌ Não está em batalha.');return reply(batStatus(bat,userId))
+    }
+
+    if(sub==='turno'){
+      const bat=getBatUser(userId);if(!bat||bat.status!=='ativo')return reply('❌ Não está em batalha.')
+      const isP1=bat.p1===userId, minhaVez=bat.vez===(isP1?1:2)
+      if(!minhaVez)return reply(`⏳ É a vez do inimigo!`)
+      const acao=args.slice(1).join(' ').trim()||'atacar'
+      const{logs,fim,vencedor,fugiu}=resolverAcao(userId,acao,bat)
+      const isMe=isP1?1:2, logTxt=logs.join('\n')
+      if(fim){
+        const venceuEle=vencedor===isMe, p1=getPet(bat.p1), p2=getPet(bat.p2)
+        const meuP=isP1?p1:p2, enP=isP1?p2:p1
+        if(venceuEle){
+          meuP.economia.moedas+=150; const lv=ganharXP(meuP,50)
+          meuP.ac=meuP.ac||{}; meuP.ac.bat_v=(meuP.ac.bat_v||0)+1
+          meuP.social=meuP.social||{}; meuP.social.batalhas_vencidas=(meuP.social.batalhas_vencidas||0)+1
+          setPet(isP1?bat.p1:bat.p2,meuP)
+          await sock.sendMessage(from,{text:`${logTxt}\n\n🏆 *${meuP.nome} VENCEU!*\n+150💰 +50XP${lv?` 🎉 LVL ${lv}!`:''}`},{quoted:msg})
+        } else {
+          enP.economia.moedas+=150; const lv=ganharXP(enP,50)
+          enP.ac=enP.ac||{}; enP.ac.bat_v=(enP.ac.bat_v||0)+1
+          enP.social=enP.social||{}; enP.social.batalhas_vencidas=(enP.social.batalhas_vencidas||0)+1
+          setPet(isP1?bat.p2:bat.p1,enP)
+          fugiu?await reply(logTxt):await sock.sendMessage(from,{text:`${logTxt}\n\n💔 *${enP.nome} venceu!* Treine mais!`,mentions:[isP1?bat.p2:bat.p1]},{quoted:msg})
+        }
+        encerrarBat(bat); return
+      }
+      const enUID=isP1?bat.p2:bat.p1
+      const bts=getBatDB(); bts[bat.id]=bat; setBatDB(bts)
+      await sock.sendMessage(from,{text:`${logTxt}\n\n━━━━━━━━━━━━━━━━━━\n❤️ Sua vida: ${~~bat[`hp${isMe}`]}/100\nInimigo: ${~~bat[`hp${isMe===1?2:1}`]}/100\n\n@${enUID.split('@')[0]} — *sua vez! Turno ${bat.turno}*`,mentions:[enUID]},{quoted:msg})
+      return
+    }
+
+    // ── LOJA ──────────────────────────────────────────────────────────────────
+    if(sub==='loja'||sub==='shop'){
+      const{pet,err}=buscar(userId);if(err)return reply(err)
+      const sem=~~(Date.now()/(7*24*3600000)), disp=[...LOJA_FX,LOJA_RT[sem%LOJA_RT.length]]
+      if(Math.random()<.05) disp.push('runa_lend')
+      let txt=`🏪 *LOJA* — 💰${pet.economia.moedas}\n\n`
+      for(const id of disp){ const it=ITENS[id];if(!it)continue; const ef=Object.entries(it.ef).filter(([k])=>!k.startsWith('_')).map(([k,v])=>`+${v} ${k}`).join(', ')||'efeito especial'; txt+=`${RE[it.r]} ${it.e} *${it.nome}* — 💰${it.p}\n_${ef}_\n\n` }
+      return reply(txt+`*.pet comprar <item>*`)
+    }
+
+    if(sub==='comprar'){const{pet,err}=buscar(userId);if(err)return reply(err);const id=args[1]?.toLowerCase(),it=ITENS[id];if(!it)return reply('❌ Item inválido. *.pet loja*');if(pet.economia.moedas<it.p)return reply(`❌ Precisa ${it.p}💰.`);pet.economia.moedas-=it.p;pet.economia.inventario.push(id);setPet(userId,pet);return reply(`✅ *${it.nome}* comprado!`)}
+
+    if(sub==='usar'){
+      const{pet,err}=buscar(userId);if(err)return reply(err)
+      const id=args[1]?.toLowerCase(),idx=pet.economia.inventario.indexOf(id);if(idx===-1)return reply(`❌ Sem *${id}*.`)
+      const it=ITENS[id];if(!it)return reply('❌ Item desconhecido.')
+      pet.economia.inventario.splice(idx,1);const apl=[]
+      for(const[k,v] of Object.entries(it.ef)){
+        if(k==='_evo'&&pet.evolucao.estagio<3){pet.evolucao.estagio++;pet.evolucao.forma='Desperto';apl.push('🌟 Evoluiu!')}
+        else if(k==='_humor'){const hi=getHI(pet.stats.humor);apl.push(`${hi.emoji} Humor: ${hi.label}(${pet.stats.humor})`)}
+        else if(k==='_prot') apl.push('🔰 Amuleto equipado')
+        else if(k==='_bat_boost'){pet.stats.mana=100;pet.stats.energia=clamp(pet.stats.energia+30);apl.push('⚡ Mana 100% +30 energia!')}
+        else if(k==='_carinho_boost') apl.push('🌸 Próximo carinho com bônus duplo!')
+        else if(pet.stats[k]!==undefined){pet.stats[k]=clamp(pet.stats[k]+v);apl.push(`+${v} ${k}`)}
+      }
+      if(it.t==='pocao'&&pet.status_temp==='doente'){pet.status_temp=null;apl.push('🎉 Curado!')}
+      if(it.t==='pocao'&&['quebrado','fugiu'].includes(pet.status)){pet.status='vivo';apl.push('💖 Recuperado!')}
+      mem(pet,'usar',it.nome);setPet(userId,pet)
+      return reply(`${it.e} Usou *${it.nome}*!\n${apl.map(a=>`✅ ${a}`).join('\n')}`)
+    }
+
+    if(['inventário','inventario','inv'].includes(sub)){
+      const{pet,err}=buscar(userId);if(err)return reply(err)
+      if(!pet.economia.inventario.length)return reply('🎒 Inventário vazio!')
+      const cnt={};pet.economia.inventario.forEach(id=>{cnt[id]=(cnt[id]||0)+1})
+      let txt=`🎒 *Inventário de ${pet.nome}*\n💰 ${pet.economia.moedas}\n\n`
+      for(const[id,q]of Object.entries(cnt)){const it=ITENS[id];if(it)txt+=`${RE[it.r]} ${it.e} *${it.nome}* ×${q}\n`}
+      return reply(txt+`\n*.pet usar <item>*`)
+    }
+
+    // ── RANKING (CANVAS) ──────────────────────────────────────────────────────
+    if(sub==='ranking'||sub==='rank'){
+      await react('🏆')
+      const lista=getAllPets().filter(([,p])=>p.status==='vivo').map(([uid2,p])=>{
+        const nl=calcNivel(p.xpTotal||0)
+        return{uid:uid2,nome:p.nome,dono:p.dono,xp:p.xpTotal||0,nivel:nl.lvl,estagio:p.evolucao?.estagio||0,forma:p.evolucao?.forma||'Ovo'}
+      }).sort((a,b)=>b.xp-a.xp).slice(0,10)
+      if(!lista.length) return reply('Nenhum pet cadastrado ainda.')
+      try{
+        const buf=await renderRankCard(lista)
+        await sock.sendMessage(from,{image:buf,caption:`🏆 *RANKING SOULPET*\nTop ${lista.length} pets mais experientes`,mimetype:'image/png'},{quoted:msg})
+      }catch(e){ console.error('[SP rank canvas]',e); await reply(`❌ Canvas do ranking falhou: ${e.message}`) }
+      return
+    }
+
+    // ── PERFIL ────────────────────────────────────────────────────────────────
+    if(sub==='perfil'){
+      const{pet,err}=buscar(userId);if(err)return reply(err)
+      const dias=~~((Date.now()-(pet.criadoEm||0))/86_400_000), nl=calcNivel(pet.xpTotal||0), tier=getTier(nl.lvl)
+      const e=['🥚','🐣','🌿','✨','👑']
+      return reply(`${e[pet.evolucao.estagio]} *${pet.nome}* ${tier.emoji} LVL ${nl.lvl} (${tier.nome})\n📖 ${pet.personalidade?.descricao||''}\n🐾 ${pet.personalidade?.especie}  •  📅 ${dias}d\nXP: ${nl.xpAtual}/${nl.xpProx} pra LVL ${nl.lvl+1}\n\nTraços: ${pet.tracos.join(' • ')||'—'}\n⚔️ ${pet.social?.batalhas_vencidas||0}W  •  💰 ${pet.economia.moedas}\n\n💬 _"${pet.personalidade?.frase_marca||'...'}"_`)
+    }
+
+    // ── RECUPERAR ─────────────────────────────────────────────────────────────
+    if(sub==='recuperar'){
+      const pet=getPet(userId);if(!pet)return reply('❌ Sem pet.')
+      if(pet.status==='vivo')return reply(`✅ *${pet.nome}* tá bem!`)
+      if(pet.economia.moedas<100)return reply(`❌ Precisa 100💰.`)
+      if(!pet.economia.inventario.some(i=>['pocao_vida','elixir_alma'].includes(i)))return reply('❌ Precisa Poção de Vida no inventário.')
+      pet.economia.moedas-=100;const i=pet.economia.inventario.findIndex(i=>['pocao_vida','elixir_alma'].includes(i));pet.economia.inventario.splice(i,1)
+      pet.status='vivo';pet.stats.vida=30;pet.stats.felicidade=40;pet.felBaixa=null
+      setPet(userId,pet);return reply(`💖 *${pet.nome} voltou!* 🙏`)
+    }
+
+    // ── FALA DIRETA: .pet <mensagem> ──────────────────────────────────────────
+    const livre=args.join(' ').trim()
+    if(livre.length>1){
+      const{pet,err}=buscar(userId);if(err)return reply(err)
+      pet.stats.felicidade=clamp(pet.stats.felicidade+3);pet.economia.moedas+=2;ganharXP(pet,2);doTracos(pet,'conversar')
+      const fala=await iaFala(pet,`dono falou diretamente: "${livre}"`,livre)
+      mem(pet,'conversar',`"${livre.slice(0,50)}"`);setPet(userId,pet)
+      return reply(`💬 *${pet.nome}:*\n_${fala}_`)
+    }
+
+    // Fallback → card
+    const{pet,err}=buscar(userId);if(err)return reply(err)
+    await envCard(ctx3,pet,userId)
+  },
+}
+
+
+export const cmdMenuPet = {
+  name:'menupet', aliases:['mpet','menusp'],
+  description:'📋 Menu completo do SoulPet', category:'rpg', cooldown:5,
+  async execute({reply}){
+    return reply(
+`┌─꧁𓆩 *SOULPET* 𓆪꧂────────────┐
+│
+│  🐾 *STATUS & PERFIL*
+│  ◈ .status     — card visual
+│  ◈ .perfil     — perfil detalhado
+│  ◈ .poderes    — seus poderes
+│  ◈ .petlist    — listar todos os pets
+│
+│  🍽️ *CUIDADOS DIÁRIOS*
+│  ◈ .alimentar  — dar comida
+│  ◈ .brincar    — brincar juntos
+│  ◈ .treinar    — treinar mana
+│  ◈ .dormir     — mandar dormir
+│  ◈ .acordar    — acordar o pet
+│
+│  💕 *CARINHO*
+│  ◈ .carinho    — fazer carinho
+│  ◈ .beijar     — dar um beijo
+│  ◈ .passeio    — sair passear
+│  ◈ .banho      — dar banho
+│
+│  ⚔️ *BATALHA*
+│  ◈ .pet batalha @alguém
+│  ◈ .pet turno <ação>
+│  ◈ .pet aceitar / .pet recusar
+│  ◈ .pet situação
+│
+│  🎮 *MINIGAMES*
+│  ◈ .pescar       — sessão de pesca
+│  ◈ .masmorra <facil/medio/dificil>
+│  ◈ .corrida @alguém
+│
+│  ⚙️ *EXTRAS*
+│  ◈ .trabalhar   — ganhar moedas (1h CD)
+│  ◈ .meditar     — recuperar mana (30min CD)
+│  ◈ .missao      — missão diária
+│  ◈ .resgatar    — resgatar missão
+│  ◈ .giftar @alguém <item>
+│  ◈ .renomear <novo nome>
+│  ◈ .verpet @alguém
+│  ◈ .petstats    — estatísticas
+│  ◈ .avaliar     — IA avalia seu pet
+│
+│  💰 *ECONOMIA*
+│  ◈ .loja       — ver loja
+│  ◈ .inv        — inventário
+│  ◈ .pet comprar <item>
+│  ◈ .pet usar <item>
+│
+│  🏆 *RANKING*
+│  ◈ .petrank    — ranking global (canvas)
+│
+│  ⚙️ *CONFIGURAÇÃO (dono)*
+│  ◈ .pet config groq <key>
+│  ◈ .pet config ver
+│  ◈ .petlist → .pet foto <nº> <estado>
+│  ◈ .pet criar <nome> <personalidade>
+│  ◈ .pet recuperar
+│
+└────────────꧁𓆩 *v6.0* 𓆪꧂─┘`)
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §16 — .petlist
+// ══════════════════════════════════════════════════════════════════════════════
+export const cmdPetList = {
+  name:'petlist', description:'📋 Lista todos os pets numerados', category:'rpg', cooldown:5,
+  async execute({ reply }){
+    const todos=getAllPets()
+    if(!todos.length) return reply('Nenhum pet cadastrado ainda.')
+    _petlistCache=todos.map(([uid,p],i)=>{
+      const nl=calcNivel(p.xpTotal||0), tier=getTier(nl.lvl)
+      return{n:i+1,uid,nome:p.nome,dono:p.dono,est:p.evolucao?.estagio||0,forma:p.evolucao?.forma||'Ovo',nivel:nl.lvl,tier}
+    })
+    const e=['🥚','🐣','🌿','✨','👑']
+    let txt='📋 *LISTA DE PETS*\n━━━━━━━━━━━━━━━━━━\n\n'
+    for(const{n,nome,dono,est,forma,nivel,tier} of _petlistCache)
+      txt+=`*${n}.* ${e[est]} *${nome}* ${tier.emoji} LVL${nivel}\n   _${forma}_ • 👤 ${dono}\n\n`
+    txt+='━━━━━━━━━━━━━━━━━━\n*.pet foto <nº> <estado>* — adicionar foto (dono)\nEstados: '+CFG.ESTADOS.join(', ')
+    return reply(txt)
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §17 — ALIASES
+// ══════════════════════════════════════════════════════════════════════════════
+const alias=(name,sub,desc)=>({name,description:desc,category:'rpg',cooldown:3,async execute(ctx3){ctx3.args=[sub,...ctx3.args];return cmdPet.execute(ctx3)}})
+
+export const cmdAlimentar = alias('alimentar','alimentar','🍖 Alimentar pet')
+export const cmdBrincar   = alias('brincar',  'brincar',  '🎯 Brincar com pet')
+export const cmdTreinar   = alias('treinar',  'treinar',  '⚔️ Treinar pet')
+export const cmdDormir    = alias('dormir',   'dormir',   '💤 Pet dormir')
+export const cmdAcordar   = alias('acordar',  'acordar',  '☀️ Acordar pet')
+export const cmdCarinho   = alias('carinho',  'carinho',  '🤗 Fazer carinho no pet')
+export const cmdBeijou    = alias('beijar',   'beijar',   '😘 Beijar o pet')
+export const cmdPasseio   = alias('passeio',  'passeio',  '🚶 Passear com o pet')
+export const cmdBanho     = alias('banho',    'banho',    '🛁 Dar banho no pet')
+export const cmdStatus    = alias('status',   '',         '🐾 Ver card do pet')
+export const cmdInv       = alias('inv',      'inventário','🎒 Ver inventário')
+export const cmdLoja      = alias('loja',     'loja',     '🏪 Ver loja')
+export const cmdRank      = alias('petrank',  'ranking',  '🏆 Ranking global')
+export const cmdPetRankAlias = alias('petranking','ranking','🏆 Ranking global')
+export const cmdPerfil    = alias('perfil',   'perfil',   '👤 Perfil do pet')
+export const cmdPoderes   = alias('poderes',  'poderes',  '✨ Ver poderes')
+export const cmdMenuAlias = alias('menu',     'menupet', '📋 Menu SoulPet')
+
+const _MG = {}
+
+const PEIXES = [
+  {n:'Peixinho Comum',  e:'🐟', r:0.35, val:15,  xp:5,  desc:'pequenininho e sem graça'},
+  {n:'Carpa Dourada',   e:'🐠', r:0.25, val:40,  xp:12, desc:'brilha um pouco pelo menos'},
+  {n:'Peixe-Palhaço',   e:'🤡', r:0.15, val:60,  xp:18, desc:'bem colorido e agitado'},
+  {n:'Tubarão Bebê',    e:'🦈', r:0.09, val:120, xp:30, desc:'deu um susto mas é pequenininho'},
+  {n:'Peixe-Espada',    e:'⚔️', r:0.06, val:180, xp:45, desc:'cortou a linha quase'},
+  {n:'Baiacu Furioso',  e:'🐡', r:0.05, val:200, xp:55, desc:'tentou te morder fora da água'},
+  {n:'Polvo Sábio',     e:'🐙', r:0.03, val:350, xp:80, desc:'ficou te encarando por uns 10 segundos'},
+  {n:'Sereia Perdida',  e:'🧜', r:0.015,val:600, xp:120,desc:'claramente não queria ser pescada'},
+  {n:'Dragão do Mar',   e:'🐲', r:0.005,val:1200,xp:250,desc:'você não acredita que pescou isso'},
+]
+
+const MASMORRAS = {
+  facil: {
+    nome:'Caverna dos Morcegos', emoji:'🦇',
+    salas:[
+      {desc:'Corredor escuro. Há marcas de garras nas paredes.',op:['👁️ Avançar devagar','⚡ Correr','🔍 Investigar as marcas'],
+       res:[
+         {txt:'Você avança com cuidado. Um morcego voa rente à sua cabeça mas nada mais.',xp:10,ouro:20,dano:0},
+         {txt:'Você corre. Derruba uma pedra que acorda uma colônia de morcegos. Eles te atacam!',xp:5,ouro:10,dano:15},
+         {txt:'As marcas são antigas. Você encontra uma moeda escondida atrás de uma pedra.',xp:15,ouro:45,dano:0,bonus:'pocao_vida'},
+       ]},
+      {desc:'Uma sala com um baú enferrujado no centro. Cheira a armadilha.',op:['🔒 Abrir com força','🧪 Checar por armadilha','🏃 Ignorar e avançar'],
+       res:[
+         {txt:'Abre o baú. Uma flecha dispara! Mas você se esquiva por reflexo.',xp:20,ouro:80,dano:20},
+         {txt:'Você examina. Encontra o mecanismo de gatilho e desativa. Baú aberto com segurança!',xp:30,ouro:100,dano:0,bonus:'pocao_mana'},
+         {txt:'Você ignora. Mais tarde você fica pensando se era algo valioso... +0 ouro de arrependimento.',xp:5,ouro:5,dano:0},
+       ]},
+      {desc:'O chefe: *Golem de Pedra*. Suas pisadas fazem o chão tremer.',op:['⚔️ Atacar direto','🌀 Usar mana','💨 Tentar flanquear'],
+       res:[
+         {txt:'Você ataca de frente. O Golem é duro demais. Você vence mas sai machucado.',xp:50,ouro:150,dano:30,fim:true},
+         {txt:'Você usa mana! A magia fratura a pedra. Vitória elegante!',xp:70,ouro:200,dano:10,fim:true,bonus:'pocao_vida'},
+         {txt:'Você flaqueia e encontra uma fraqueza nos joelhos! Golem cai. Vitória total!',xp:80,ouro:220,dano:0,fim:true,bonus:'pocao_mana'},
+       ]},
+    ]
+  },
+  medio: {
+    nome:'Templo da Névoa', emoji:'🌫️',
+    salas:[
+      {desc:'A névoa engole a visão. Vozes sussurram seu nome.',op:['🧘 Fechar os olhos e meditar','🔦 Invocar luz','😱 Seguir as vozes'],
+       res:[
+         {txt:'Na meditação você enxerga além da névoa. O caminho fica claro.',xp:20,ouro:30,dano:0},
+         {txt:'A luz dissolve parte da névoa. Você vê um item brilhando no chão.',xp:15,ouro:20,dano:0,bonus:'pocao_mana'},
+         {txt:'As vozes te levam a uma armadilha! Você cai num poço raso.',xp:10,ouro:0,dano:25},
+       ]},
+      {desc:'Um guardião fantasma bloqueia a passagem. Ele ri de você.',op:['😤 Ignorar e passar','💬 Falar com ele','⚔️ Atacar o fantasma'],
+       res:[
+         {txt:'Ele te deixa passar. Surpresa — ele só queria ser ignorado.',xp:15,ouro:40,dano:0},
+         {txt:'Ele conta segredos do templo! Você encontra um atalho com tesouro.',xp:35,ouro:120,dano:0,bonus:'elixir_fome'},
+         {txt:'Você ataca mas a arma passa direto. Ele ri ainda mais. -mana.',xp:5,ouro:10,dano:30},
+       ]},
+      {desc:'Sala do Oráculo. Uma entidade te observa silenciosamente.',op:['🙏 Oferecer mana','❓ Fazer uma pergunta','💀 Desafiar o oráculo'],
+       res:[
+         {txt:'O oráculo abençoa você. Stats recuperados e um presente.',xp:40,ouro:60,dano:-30,bonus:'pocao_mana'},
+         {txt:'Ele responde: "A resposta que você procura já está em você." Profundo. +xp.',xp:55,ouro:80,dano:0},
+         {txt:'Você desafia. Ele aceita. É uma batalha de mentes — você vence por teimosia.',xp:90,ouro:250,dano:20,fim:true,bonus:'runa_lend'},
+       ]},
+    ]
+  },
+  dificil: {
+    nome:'Abismo Eterno', emoji:'🕳️',
+    salas:[
+      {desc:'A gravidade aqui é estranha. Você está no teto sem saber como.',op:['🔄 Tentar direito','😎 Abraçar o caos','🌀 Usar mana pra fixar'],
+       res:[
+         {txt:'Você insiste na física normal. Cai no chão. Dói.',xp:10,ouro:20,dano:20},
+         {txt:'Você abraça o caos! Descobre um passagem secreta no teto-chão.',xp:40,ouro:100,dano:0,bonus:'pocao_vida'},
+         {txt:'A mana cria um campo de gravidade. Você caminha normalmente.',xp:30,ouro:60,dano:0},
+       ]},
+      {desc:'Dois caminhos: um brilhante com música suave, outro escuro com cheiro de moedas.',op:['✨ Caminho brilhante','🌑 Caminho escuro','🃏 Jogo de moeda'],
+       res:[
+         {txt:'Brilhante era armadilha. Você escapa mas machucado.',xp:20,ouro:40,dano:35},
+         {txt:'Escuro = cofre enorme de moedas! Olhos se adaptam.',xp:30,ouro:300,dano:0},
+         {txt:'Cara: brilhante. Você tomba mas com boa graça. Coroa: escuro. Rico.',xp:25,ouro:Math.random()>.5?250:0,dano:10},
+       ]},
+      {desc:'O Chefe Final: *Sombra Ancestral*. É um reflexo de você mesmo, mas mais forte.',op:['🪞 Aceitar que é você','⚔️ Lutar com tudo','🤝 Tentar negociar'],
+       res:[
+         {txt:'Você aceita. A sombra se dissolve. Paz absoluta. Você ganhou algo que não tem nome.',xp:150,ouro:400,dano:0,fim:true,bonus:'runa_lend'},
+         {txt:'Batalha épica. Você vence na raça. Saindo no último fôlego.',xp:120,ouro:350,dano:50,fim:true,bonus:'pocao_vida'},
+         {txt:'A sombra ri mas aceita. Vocês fazem um acordo estranho. Você sai com segredos.',xp:130,ouro:320,dano:10,fim:true,bonus:'elixir_alma'},
+       ]},
+    ]
+  },
+}
+
+
+export const cmdRenomear = {
+  name:'renomear', aliases:['rename','renom'],
+  description:'✏️ Renomeia seu pet', category:'rpg', cooldown:10,
+  async execute({reply,args,userId}){
+    const pet=getPet(userId)
+    if(!pet) return reply('❌ Você não tem um pet.')
+    const novo=(args.join(' ')||'').trim()
+    if(!novo) return reply('❌ *.renomear <novo nome>*')
+    if(novo.length>20) return reply('❌ Máximo 20 caracteres.')
+    const velho=pet.nome
+    pet.nome=novo; setPet(userId,pet)
+    return reply(`✅ *${velho}* agora se chama *${novo}*!`)
+  }
+}
+
+export const cmdVerPet = {
+  name:'verpet', aliases:['petde','whopet'],
+  description:'👁️ Ver o pet de outro usuário', category:'rpg', cooldown:5,
+  async execute({reply,msg,sock,from}){
+    const rid=msg?.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0]
+    if(!rid) return reply('❌ *.verpet @alguém*')
+    const pet=getPet(rid)
+    if(!pet||pet.status!=='vivo') return reply('❌ Esse usuário não tem pet ativo.')
+    const p=decay(pet), hi=getHI(p.stats.humor), nl=calcNivel(p.xpTotal||0), tier=getTier(nl.lvl)
+    const e=['🥚','🐣','🌿','✨','👑']
+    return reply(
+      `${e[p.evolucao.estagio]} *${p.nome}* ${tier.emoji} LVL${nl.lvl}
+`+
+      `👤 Dono: ${p.dono}
+🐾 ${p.personalidade?.especie||'???'}
+`+
+      `${hi.emoji} Humor: ${hi.label}
+`+
+      `❤️ HP ${~~p.stats.vida}% | ✨ Mana ${~~p.stats.mana}%
+`+
+      `🏷️ Traços: ${p.tracos.join(' • ')||'—'}
+`+
+      `💬 _"${p.personalidade?.frase_marca||'...'}"_`
+    )
+  }
+}
+
+export const cmdTrabalhar = {
+  name:'trabalhar', aliases:['work','trampo'],
+  description:'💼 Seu pet trabalha para ganhar moedas', category:'rpg', cooldown:0,
+  async execute({reply,userId,react}){
+    const{pet,err}=buscar(userId); if(err) return reply(err)
+    if(pet.dormindo) return reply(`💤 *${pet.nome}* tá dormindo, não pode trabalhar!`)
+    if(pet.stats.energia<15) return reply(`😓 Sem energia pra trabalhar!`)
+    const cd=60*60*1000
+    if(pet._workTs&&(Date.now()-pet._workTs)<cd){
+      const min=Math.ceil((cd-(Date.now()-pet._workTs))/60000)
+      return reply(`⏳ *${pet.nome}* já trabalhou. Pode trabalhar de novo em *${min} min*.`)
+    }
+    const empregos=[
+      {nome:'Entregador',e:'🛵',base:60,xp:8},
+      {nome:'Garçom',e:'🍽️',base:50,xp:7},
+      {nome:'Programador',e:'💻',base:120,xp:15},
+      {nome:'Artista de Rua',e:'🎨',base:40,xp:10},
+      {nome:'Guarda de Masmorra',e:'⚔️',base:90,xp:12},
+      {nome:'Caçador de Recompensas',e:'🎯',base:150,xp:20},
+      {nome:'Curandeiro Viajante',e:'💚',base:80,xp:14},
+      {nome:'Comerciante de Poções',e:'🧪',base:100,xp:11},
+    ]
+    const emp=empregos[~~(Math.random()*empregos.length)]
+    const bonus=pet.tracos.includes('disciplinado')?1.3:pet.tracos.includes('guerreiro')?1.2:1
+    const ganho=~~(emp.base*bonus+(Math.random()*30))
+    pet.economia.moedas+=ganho; pet.stats.energia=clamp(pet.stats.energia-15)
+    pet.stats.fome=clamp(pet.stats.fome-10); pet._workTs=Date.now()
+    const lv=ganharXP(pet,emp.xp)
+    doTracos(pet,'trabalhar'); setPet(userId,pet)
+    await react('💼')
+    return reply(
+      `${emp.e} *${pet.nome}* trabalhou como *${emp.nome}*!
+
+`+
+      `+${ganho}💰 +${emp.xp}XP`+(lv?`
+🎉 *LEVEL UP! LVL ${lv}!*`:'')+
+      `
+
+_(Pode trabalhar de novo em 1h)_`
+    )
+  }
+}
+
+export const cmdMissao = {
+  name:'missao', aliases:['missão','quest','diario'],
+  description:'📋 Missão diária do seu pet', category:'rpg', cooldown:0,
+  async execute({reply,userId}){
+    const{pet,err}=buscar(userId); if(err) return reply(err)
+    const hoje=new Date().toDateString()
+    if(pet._missaoData===hoje&&pet._missaoConcluida){
+      return reply(`✅ *${pet.nome}* já completou a missão de hoje!
+Volte amanhã para uma nova.`)
+    }
+    if(pet._missaoData!==hoje){
+      const missoes=[
+        {desc:`Alimente *${pet.nome}* 3 vezes`,tipo:'alimentar',meta:3,xp:50,ouro:100},
+        {desc:`Faça carinho em *${pet.nome}* 2 vezes`,tipo:'carinho',meta:2,xp:40,ouro:80},
+        {desc:`Treine *${pet.nome}* 4 vezes`,tipo:'treinar',meta:4,xp:60,ouro:120},
+        {desc:`Leve *${pet.nome}* pra passear 2 vezes`,tipo:'passeio',meta:2,xp:70,ouro:150},
+        {desc:`Brinque com *${pet.nome}* 3 vezes`,tipo:'brincar',meta:3,xp:45,ouro:90},
+        {desc:`Faça *${pet.nome}* dormir e acordar`,tipo:'dormir',meta:1,xp:35,ouro:70},
+        {desc:`Dê banho em *${pet.nome}* 2 vezes`,tipo:'banho',meta:2,xp:40,ouro:85},
+      ]
+      pet._missaoAtual=missoes[~~(Math.random()*missoes.length)]
+      pet._missaoData=hoje; pet._missaoProgress=0; pet._missaoConcluida=false
+      setPet(userId,pet)
+    }
+    const m=pet._missaoAtual
+    if(!m) return reply('❌ Erro ao gerar missão. Tente novamente.')
+    const prog=pet._missaoProgress||0
+    const pct=Math.min(prog,m.meta)
+    const barra='█'.repeat(pct)+'░'.repeat(Math.max(0,m.meta-pct))
+    return reply(
+      `📋 *MISSÃO DIÁRIA*
+━━━━━━━━━━━━━━━━━━
+
+`+
+      `${m.desc}
+
+`+
+      `Progresso: [${barra}] ${pct}/${m.meta}
+
+`+
+      `Recompensa: *+${m.xp} XP* + *${m.ouro}💰*
+
+`+
+      (prog>=m.meta?`✅ *CONCLUÍDA!* Use *.missao resgatar*`:`_Continue interagindo com seu pet!_`)
+    )
+  }
+}
+
+export const cmdMissaoResgatar = {
+  name:'resgatar', aliases:['resgate','claim'],
+  description:'🎁 Resgata recompensa da missão diária', category:'rpg', cooldown:0,
+  async execute({reply,userId}){
+    const pet=getPet(userId); if(!pet) return reply('❌ Sem pet.')
+    const hoje=new Date().toDateString()
+    if(pet._missaoData!==hoje||!pet._missaoAtual) return reply('❌ Sem missão ativa. Use *.missao*')
+    if(pet._missaoConcluida) return reply('✅ Já resgatou a recompensa de hoje!')
+    if((pet._missaoProgress||0)<pet._missaoAtual.meta) return reply(`❌ Missão não concluída ainda.
+Progresso: ${pet._missaoProgress||0}/${pet._missaoAtual.meta}`)
+    const m=pet._missaoAtual
+    pet.economia.moedas+=m.ouro; const lv=ganharXP(pet,m.xp); pet._missaoConcluida=true
+    setPet(userId,pet)
+    return reply(`🎁 *Recompensa resgatada!*
++${m.ouro}💰 +${m.xp}XP${lv?`
+🎉 LEVEL UP! LVL ${lv}!`:''}`)
+  }
+}
+
+export const cmdGiftar = {
+  name:'giftar', aliases:['gift','dar','presentear'],
+  description:'🎁 Presenteia outro usuário com um item', category:'rpg', cooldown:10,
+  async execute({reply,args,userId,msg,sock,from}){
+    const{pet,err}=buscar(userId); if(err) return reply(err)
+    const rid=msg?.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0]
+    const itemId=(args[1]||args[0]||'').toLowerCase().replace('@','').split('@')[0]
+    if(!rid) return reply('❌ *.giftar @alguém <item>*\nEx: *.giftar @fulano ração*')
+    if(rid===userId) return reply('❌ Não pode presentear a si mesmo.')
+    if(!itemId||!ITENS[itemId]) return reply(`❌ Item inválido. Use *.inv* pra ver seu inventário.`)
+    const idx=pet.economia.inventario.indexOf(itemId)
+    if(idx===-1) return reply(`❌ Você não tem *${ITENS[itemId].nome}* no inventário.`)
+    const rival=getPet(rid)
+    if(!rival) return reply('❌ Esse usuário não tem pet.')
+    pet.economia.inventario.splice(idx,1); rival.economia.inventario.push(itemId)
+    setPet(userId,pet); setPet(rid,rival)
+    const it=ITENS[itemId]
+    await sock.sendMessage(from,{text:`🎁 *${pet.nome}* presenteou *${rival.nome}* com *${it.nome}* ${it.e}!
+
+_(presente de ${pet.dono})_`,mentions:[rid]},{quoted:msg})
+    return reply(`✅ *${it.nome}* enviado com sucesso!`)
+  }
+}
+
+export const cmdMeditar = {
+  name:'meditar', aliases:['meditate','mana'],
+  description:'🧘 Medita para recuperar mana', category:'rpg', cooldown:0,
+  async execute({reply,userId,react}){
+    const{pet,err}=buscar(userId); if(err) return reply(err)
+    if(pet.dormindo) return reply(`💤 *${pet.nome}* tá dormindo.`)
+    if(pet.stats.energia<10) return reply('😓 Sem energia pra meditar!')
+    const cd=30*60*1000
+    if(pet._meditTs&&(Date.now()-pet._meditTs)<cd){
+      const min=Math.ceil((cd-(Date.now()-pet._meditTs))/60000)
+      return reply(`🧘 *${pet.nome}* ainda está em estado meditativo. Aguarde *${min} min*.`)
+    }
+    const base=pet.tracos.includes('disciplinado')?35:25
+    const recuperou=~~(base+(Math.random()*10))
+    pet.stats.mana=clamp(pet.stats.mana+recuperou)
+    pet.stats.energia=clamp(pet.stats.energia-10)
+    pet.stats.felicidade=clamp(pet.stats.felicidade+5)
+    pet._meditTs=Date.now()
+    const lv=ganharXP(pet,6); setPet(userId,pet)
+    await react('🧘')
+    return reply(`🧘 *${pet.nome}* meditou!
+
+✨ +${recuperou} mana (total: ${~~pet.stats.mana})
+⚡ -10 energia
++6 XP${lv?`
+🎉 LVL ${lv}!`:''}
+_(Pode meditar novamente em 30 min)_`)
+  }
+}
+
+export const cmdCriarCmdIA = {
+  name:'criarcmd', aliases:['criarcomando','ia-cmd'],
+  description:'🤖 Cria um resposta automática usando IA do Groq', category:'owner', cooldown:10,
+  async execute({reply,args,isOwner,isSubdono,userId,sock,from,msg}){
+    if(!isOwner&&!isSubdono) return reply('🔒 Só o dono pode criar comandos via IA.')
+    const txt=args.join(' ').trim()
+    if(!txt) return reply('❌ *.criarcmd <o que o comando deve fazer>*\nEx: *.criarcmd quando alguém disser oi, responda com uma saudação animada*')
+    const cfg=getCfg(), gk=cfg.groq_key||''
+    if(!gk) return reply('❌ Configure o Groq primeiro: *.pet config groq <key>*')
+    await reply('🤖 Gerando resposta com IA...')
+    const r=await iaCall(
+      `Você é um assistente de bot do WhatsApp. O usuário quer criar uma resposta automática para o seguinte caso:
+"${txt}"
+
+Crie uma resposta curta, simpática e em português para esse caso. Máximo 3 frases. Seja criativo e use emojis.`,
+      200
+    )
+    if(!r) return reply('❌ IA não respondeu. Verifique a key do Groq.')
+    return reply(`🤖 *Resposta gerada pela IA:*
+
+${r}
+
+_Essa resposta foi gerada pelo modelo llama-3.1-8b-instant via Groq_`)
+  }
+}
+
+export const cmdPetStats = {
+  name:'petstats', aliases:['stats','estatisticas'],
+  description:'📊 Estatísticas detalhadas do pet', category:'rpg', cooldown:5,
+  async execute({reply,userId}){
+    const{pet,err}=buscar(userId); if(err) return reply(err)
+    const dias=~~((Date.now()-(pet.criadoEm||0))/86_400_000)
+    const nl=calcNivel(pet.xpTotal||0), tier=getTier(nl.lvl)
+    const ac=pet.ac||{}
+    const totalAcoes=Object.values(ac).reduce((a,b)=>a+b,0)
+    return reply(
+      `📊 *ESTATÍSTICAS — ${pet.nome}* ${tier.emoji}
+━━━━━━━━━━━━━━━━━━
+
+`+
+      `📅 Idade: *${dias} dias*
+`+
+      `⭐ XP Total: *${pet.xpTotal||0}*
+`+
+      `🏆 Nível: *${nl.lvl}* (${tier.nome})
+`+
+      `🔄 Total de ações: *${totalAcoes}*
+
+`+
+      `📋 *Detalhes:*
+`+
+      `🍖 Alimentou: ${ac.alimentar||0}×
+`+
+      `🎯 Brincou: ${ac.brincar||0}×
+`+
+      `⚔️ Treinou: ${ac.treinar||0}×
+`+
+      `🤗 Carinho: ${ac.carinho||0}×
+`+
+      `😘 Beijos: ${ac.beijar||0}×
+`+
+      `🚶 Passeios: ${ac.passeio||0}×
+`+
+      `🛁 Banhos: ${ac.banho||0}×
+`+
+      `💬 Conversas: ${ac.conversar||0}×
+`+
+      `⚔️ Batalhas vencidas: ${ac.bat_v||0}×
+
+`+
+      `🏷️ Traços (${pet.tracos.length}): ${pet.tracos.join(', ')||'nenhum'}`
+    )
+  }
+}
+
+export const cmdAvaliar = {
+  name:'avaliar', aliases:['avaliarpet','petreview'],
+  description:'🤖 IA avalia o seu pet', category:'rpg', cooldown:30,
+  async execute({reply,userId,react}){
+    const{pet,err}=buscar(userId); if(err) return reply(err)
+    await react('🤖')
+    const nl=calcNivel(pet.xpTotal||0), tier=getTier(nl.lvl)
+    const dias=~~((Date.now()-(pet.criadoEm||0))/86_400_000)
+    const r=await iaCall(
+      `Você é um especialista em pets virtuais. Avalie o seguinte pet de forma carinhosa, honesta e divertida em português:
+
+`+
+      `Nome: ${pet.nome}
+Espécie: ${pet.personalidade?.especie}
+Nível: ${nl.lvl} (${tier.nome})
+`+
+      `Traços: ${pet.tracos.join(', ')||'nenhum'}
+Idade: ${dias} dias
+`+
+      `HP: ${~~pet.stats.vida}% | Felicidade: ${~~pet.stats.felicidade}% | Mana: ${~~pet.stats.mana}%
+`+
+      `Batalhas vencidas: ${pet.ac?.bat_v||0}
+
+Dê uma avaliação em 3-4 frases com uma nota de 0-10 e dicas para melhorar.`,
+      250
+    )
+    if(!r) return reply('❌ IA não respondeu. Configure o Groq: *.pet config groq <key>*')
+    return reply(`🤖 *Avaliação de ${pet.nome}:*
+
+${r}`)
+  }
+}
+
+export const cmdPescar = {
+  name:'pescar', aliases:['pesca','fish'],
+  description:'🎣 Minigame de pesca', category:'rpg', cooldown:0,
+  async execute({reply,userId,args,react}){
+    const{pet,err}=buscar(userId);if(err)return reply(err)
+    if(pet.dormindo)return reply(`💤 Acorda *${pet.nome}* primeiro!`)
+    if(pet.stats.energia<8)return reply(`😓 *${pet.nome}* tá sem energia pra pescar!`)
+
+    const sess=_MG[`p_${userId}`]
+    if(!sess){
+      if(pet.economia.moedas<10)return reply(`❌ Precisa de 10💰 pra comprar isca.`)
+      pet.economia.moedas-=10
+      const rodas=pet.tracos.includes('aventureiro')?5:pet.tracos.includes('disciplinado')?4:3
+      _MG[`p_${userId}`]={rodada:0,total:rodas,pescados:[],xpTotal:0,ouroTotal:0,ts:Date.now()}
+      setPet(userId,pet)
+      return reply(`🎣 *${pet.nome}* foi pescar!\n\n-10💰 (isca)\n${rodas} tentativas disponíveis\nIsca na linha... aguarde um segundo e use:\n*.pescar lançar*`)
+    }
+
+    const sub=(args[0]||'').toLowerCase()
+    if(sub!=='lançar'&&sub!=='lancar')return reply(`🎣 Use *.pescar lançar* para lançar a linha!\n_Rodada ${sess.rodada+1}/${sess.total}_`)
+
+    if(Date.now()-sess.ts<2000)return reply(`⏳ A linha ainda tá se assentando...`)
+
+    sess.rodada++
+    const r=Math.random(), peixe=PEIXES.find(p2=>{ let acc=0; for(const px of PEIXES){acc+=px.r;if(r<=acc)return px===p2}; return false })||PEIXES[0]
+    const sort=Math.random()
+
+    let resultado, xp=0, ouro=0, bonus=null
+    if(sort<0.15){
+      resultado=`💦 A linha veio vazia... ${pet.nome} reclama do tempo.`
+    } else if(sort<0.25){
+      resultado=`🥾 Pescou uma bota velha. ${pet.nome} parece com raiva.`; ouro=5; xp=2
+    } else {
+      xp=peixe.xp; ouro=peixe.val
+      if(pet.tracos.includes('glutão')&&peixe.r<0.1){ xp=~~(xp*1.5); ouro=~~(ouro*1.3) }
+      sess.pescados.push(peixe.e)
+      resultado=`${peixe.e} *${peixe.n}!* +${ouro}💰 +${xp}XP\n_${peixe.desc}_`
+      if(peixe.r<=0.015) bonus=`\n🌟 *PEIXE LENDÁRIO!* ${pet.nome} parece radiante!`
+    }
+
+    sess.xpTotal+=xp; sess.ouroTotal+=ouro; sess.ts=Date.now()
+
+    if(sess.rodada>=sess.total){
+      const lv=ganharXP(pet,sess.xpTotal)
+      pet.economia.moedas+=sess.ouroTotal
+      pet.stats.energia=clamp(pet.stats.energia-8)
+      delete _MG[`p_${userId}`]
+      doTracos(pet,'passeio'); setPet(userId,pet)
+      await react('🎣')
+      return reply(`${resultado}${bonus||''}\n\n━━━━━━━━━━━━━━━━━━\n🎣 *Sessão encerrada!*\nPescados: ${sess.pescados.join('')||'nada 😢'}\n💰 +${sess.ouroTotal} moedas\n⭐ +${sess.xpTotal} XP${lv?`\n🎉 *LEVEL UP! LVL ${lv}!*`:''}`)
+    }
+
+    setPet(userId,pet)
+    return reply(`${resultado}${bonus||''}\n\n_Rodada ${sess.rodada}/${sess.total} • +${sess.ouroTotal}💰 acumulado_\nUse *.pescar lançar* de novo!`)
+  }
+}
+
+export const cmdMasmorra = {
+  name:'masmorra', aliases:['dungeon','masmorras'],
+  description:'🏰 Minigame de dungeon', category:'rpg', cooldown:0,
+  async execute({reply,userId,args,react,sock,from,msg}){
+    const{pet,err}=buscar(userId);if(err)return reply(err)
+    if(pet.dormindo)return reply(`💤 Acorda *${pet.nome}* primeiro!`)
+
+    const sess=_MG[`d_${userId}`]
+
+    if(!sess){
+      const dif=(args[0]||'facil').toLowerCase()
+      if(!MASMORRAS[dif])return reply(`❌ Dificuldades: *facil* • *medio* • *dificil*\nEx: *.masmorra facil*`)
+      if(pet.stats.energia<20)return reply(`😓 *${pet.nome}* tá sem energia!`)
+      const custo={facil:0,medio:5,dificil:10}[dif]
+      if(pet.stats.mana<custo)return reply(`❌ Precisa de ${custo} mana pra entrar.`)
+
+      const dungeon=MASMORRAS[dif]
+      _MG[`d_${userId}`]={ dif, sala:0, hp:100, mana:pet.stats.mana-custo, xpTotal:0, ouroTotal:0, bonus:null, ts:Date.now() }
+      pet.stats.mana=clamp(pet.stats.mana-custo); setPet(userId,pet)
+      const s=dungeon.salas[0]
+      return reply(`🏰 *${dungeon.emoji} ${dungeon.nome}*\n━━━━━━━━━━━━━━━━━━\n❤️ HP: 100  🔵 Mana: ${~~_MG[`d_${userId}`].mana}\n\n📍 *Sala 1/${dungeon.salas.length}*\n${s.desc}\n\n${s.op.map((o,i)=>`*${i+1}.* ${o}`).join('\n')}\n\nResponda com *.masmorra <1/2/3>*`)
+    }
+
+    const escolha=parseInt(args[0])
+    if(isNaN(escolha)||escolha<1||escolha>3)return reply(`❌ Escolha 1, 2 ou 3!`)
+
+    const dungeon=MASMORRAS[sess.dif]
+    const sala=dungeon.salas[sess.sala]
+    const res=sala.res[(escolha-1)%sala.res.length]
+
+    sess.hp=Math.min(100,sess.hp-res.dano+(res.dano<0?Math.abs(res.dano):0))
+    sess.xpTotal+=res.xp; sess.ouroTotal+=res.ouro
+    if(res.bonus) sess.bonus=res.bonus
+
+    let txt=`${res.txt}\n${res.xp>0?`+${res.xp}XP `:''} ${res.ouro>0?`+${res.ouro}💰`:''} ${res.dano>0?`-${res.dano} HP`:res.dano<0?`+${Math.abs(res.dano)} HP`:''}`
+
+    if(sess.hp<=0){
+      delete _MG[`d_${userId}`]
+      pet.stats.energia=clamp(pet.stats.energia-20); setPet(userId,pet)
+      return reply(`${txt}\n\n💀 *${pet.nome} caiu na masmorra!*\nMoedas parciais: ${~~(sess.ouroTotal*.5)}💰\n_Tente novamente com mais energia!_`)
+    }
+
+    if(res.fim||sess.sala>=dungeon.salas.length-1){
+      const lv=ganharXP(pet,sess.xpTotal)
+      pet.economia.moedas+=sess.ouroTotal
+      pet.stats.energia=clamp(pet.stats.energia-20)
+      pet.stats.mana=clamp(pet.stats.mana+10)
+      if(sess.bonus&&ITENS[sess.bonus]){ pet.economia.inventario.push(sess.bonus) }
+      doTracos(pet,'treinar'); delete _MG[`d_${userId}`]; setPet(userId,pet)
+      await react('🏆')
+      return reply(`${txt}\n\n🏆 *${pet.nome} COMPLETOU ${dungeon.nome}!*\n━━━━━━━━━━━━━━━━━━\n💰 +${sess.ouroTotal} moedas\n⭐ +${sess.xpTotal} XP${lv?`\n🎉 *LEVEL UP! LVL ${lv}!*`:''}\n${sess.bonus?`🎁 Item: *${ITENS[sess.bonus]?.nome}*\n`:''}\n_HP final: ${~~sess.hp}/100_`)
+    }
+
+    sess.sala++; sess.ts=Date.now()
+    const prox=dungeon.salas[sess.sala]
+    return reply(`${txt}\n━━━━━━━━━━━━━━━━━━\n❤️ HP: ${~~sess.hp}/100  🔵 Mana: ${~~sess.mana}\n\n📍 *Sala ${sess.sala+1}/${dungeon.salas.length}*\n${prox.desc}\n\n${prox.op.map((o,i)=>`*${i+1}.* ${o}`).join('\n')}\n\n*.masmorra <1/2/3>*`)
+  }
+}
+
+const CORRIDA_PISTAS=[
+  {nome:'Praia Rasa',   emoji:'🏖️', blocos:5, eventos:['areia grossa','vento de frente','rampa de areia','onda lateral','sprint final']},
+  {nome:'Floresta Densa',emoji:'🌲',blocos:5, eventos:['raízes no chão','cipó alto','clareza','lama','salto de tronco']},
+  {nome:'Cidade Noturna',emoji:'🌆',blocos:5, eventos:['semáforo verde','multidão','atalho','calçada molhada','linha de chegada']},
+]
+
+export const cmdCorrida = {
+  name:'corrida', aliases:['race','correr'],
+  description:'🏃 Minigame de corrida', category:'rpg', cooldown:0,
+  async execute({reply,userId,args,react,sock,from,msg}){
+    const{pet:meu,err}=buscar(userId);if(err)return reply(err)
+    if(meu.dormindo)return reply(`💤 Acorda *${meu.nome}* primeiro!`)
+    if(meu.stats.energia<15)return reply(`😓 Sem energia pra correr!`)
+
+    const sessKey=`c_${userId}`
+    const existente=Object.keys(_MG).find(k=>k.startsWith('c_')&&_MG[k]?.p2===userId)
+
+    if((args[0]||'').toLowerCase()==='aceitar'){
+      const sKey=Object.keys(_MG).find(k=>k.startsWith('c_')&&_MG[k]?.p2===userId&&_MG[k]?.status==='aguardando')
+      if(!sKey)return reply('❌ Nenhuma corrida pendente.')
+      const sess=_MG[sKey]
+      const rival=getPet(sess.p1); if(!rival)return reply('❌ Desafiante sumiu.')
+      sess.status='ativo'; sess.vez='p1'
+      _MG[sKey]=sess
+      const pista=CORRIDA_PISTAS[sess.pistaIdx]
+      return reply(`🏁 *CORRIDA INICIADA!*\n🏖️ Pista: *${pista.emoji} ${pista.nome}*\n\n${rival.nome} vs *${meu.nome}*\n\n@${sess.p1.split('@')[0]} vai primeiro!\n\nEscolha como *${rival.nome}* vai encarar: *${pista.eventos[0]}*\n*1.* 💨 Velocidade máxima (arrisca energia)\n*2.* ⚖️ Ritmo controlado (seguro)\n*3.* 🌀 Usar mana (gasta mana, garante avanço)\n\n*.corrida <1/2/3>*`)
+    }
+
+    if((args[0]||'').toLowerCase()==='recusar'){
+      const sKey=Object.keys(_MG).find(k=>k.startsWith('c_')&&_MG[k]?.p2===userId&&_MG[k]?.status==='aguardando')
+      if(!sKey)return reply('❌ Nenhuma corrida pendente.')
+      const sess=_MG[sKey]; delete _MG[sKey]
+      return reply(`❌ *${meu.nome}* recusou a corrida de *${getPet(sess.p1)?.nome||'?'}*.`)
+    }
+
+    const sessAtiva=_MG[sessKey]||Object.values(_MG).find(s=>s?.p2===userId&&s?.status==='ativo')
+    if(sessAtiva&&sessAtiva.status==='ativo'){
+      const escolha=parseInt(args[0]); if(isNaN(escolha)||escolha<1||escolha>3)return reply('❌ Escolha 1, 2 ou 3!')
+      const isMeuVez=(sessAtiva.vez==='p1'&&sessAtiva.p1===userId)||(sessAtiva.vez==='p2'&&sessAtiva.p2===userId)
+      if(!isMeuVez)return reply('⏳ Aguarda a vez do seu oponente!')
+
+      const pista=CORRIDA_PISTAS[sessAtiva.pistaIdx]
+      const quem=sessAtiva.vez==='p1'?'p1':'p2'
+      const evento=pista.eventos[sessAtiva.bloco]||'sprint final'
+      const petAtual=getPet(sessAtiva[quem])
+
+      const resultados=[
+        {txt:'💨 Velocidade max!',  pts:30, energyCost:25, manaCost:0,  luck:.3},
+        {txt:'⚖️ Ritmo controlado',pts:20, energyCost:10, manaCost:0,  luck:.1},
+        {txt:'🌀 Usar mana',       pts:25, energyCost:5,  manaCost:20, luck:.0},
+      ]
+      const res=resultados[escolha-1]
+      const lucro=Math.random()<res.luck?15:0
+      const pontosGanhos=res.pts+lucro
+      sessAtiva[`pts_${quem}`]=(sessAtiva[`pts_${quem}`]||0)+pontosGanhos
+
+      let txt=`${res.txt} em *${evento}*!\n+${pontosGanhos} pts${lucro>0?' ⚡ (bonus!)':''}`
+
+      sessAtiva.bloco=(sessAtiva.bloco||0)+1
+      sessAtiva.vez=quem==='p1'?'p2':'p1'
+
+      if(sessAtiva.bloco>=pista.blocos*2){
+        const ptsP1=sessAtiva.pts_p1||0, ptsP2=sessAtiva.pts_p2||0
+        const venceu=ptsP1>ptsP2?sessAtiva.p1:sessAtiva.p2
+        const perdi=venceu===sessAtiva.p1?sessAtiva.p2:sessAtiva.p1
+        const pvenc=getPet(venceu), pperd=getPet(perdi)
+        if(pvenc){ const lv=ganharXP(pvenc,60); pvenc.economia.moedas+=200; pvenc.stats.energia=clamp(pvenc.stats.energia-15); setPet(venceu,pvenc)
+          if(lv) await sock.sendMessage(from,{text:`🎉 *LEVEL UP! ${pvenc.nome} → LVL ${lv}!*`}) }
+        if(pperd){ ganharXP(pperd,20); pperd.economia.moedas+=50; pperd.stats.energia=clamp(pperd.stats.energia-15); setPet(perdi,pperd) }
+        const sKey=Object.keys(_MG).find(k=>_MG[k]===sessAtiva); if(sKey) delete _MG[sKey]
+        await react('🏆')
+        return reply(`${txt}\n\n🏁 *FIM DA CORRIDA!*\n${pista.emoji} ${pista.nome}\n━━━━━━━━━━━━━━━━━━\n🥇 *${pvenc?.nome||'?'}* — ${Math.max(ptsP1,ptsP2)} pts\n🥈 *${pperd?.nome||'?'}* — ${Math.min(ptsP1,ptsP2)} pts\n\n+200💰 +60XP pro vencedor!`)
+      }
+
+      const proximo=pista.eventos[~~(sessAtiva.bloco/2)]||'linha de chegada'
+      const prxPet=getPet(sessAtiva[sessAtiva.vez])
+      const sKey=Object.keys(_MG).find(k=>_MG[k]===sessAtiva); if(sKey) _MG[sKey]=sessAtiva
+      return reply(`${txt}\n\nPlacar: 🔴${sessAtiva.pts_p1||0} × 🔵${sessAtiva.pts_p2||0}\n\n@${sessAtiva[sessAtiva.vez].split('@')[0]}, sua vez!\n*${prxPet?.nome}* vai encarar: *${proximo}*\n\n*1.* 💨 Velocidade max  *2.* ⚖️ Ritmo  *3.* 🌀 Mana\n*.corrida <1/2/3>*`)
+    }
+
+    const ridUid=msg?.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0]
+    if(!ridUid)return reply('❌ *.corrida @alguem* pra desafiar, ou *.corrida solo* pra treinar!')
+
+    if(ridUid===userId)return reply('❌ Não pode correr contra si mesmo 😅')
+    const rival=getPet(ridUid);if(!rival||rival.status!=='vivo')return reply('❌ Pet rival indisponível.')
+    if(Object.values(_MG).some(s=>s?.p1===userId||s?.p2===userId))return reply('❌ Você já está em uma corrida!')
+
+    const pista=CORRIDA_PISTAS[~~(Math.random()*CORRIDA_PISTAS.length)]
+    const cKey=`c_${Date.now()}`
+    _MG[cKey]={p1:userId,p2:ridUid,pistaIdx:CORRIDA_PISTAS.indexOf(pista),bloco:0,pts_p1:0,pts_p2:0,status:'aguardando',vez:'p1',ts:Date.now()}
+    await sock.sendMessage(from,{text:`🏃 *${meu.nome}* desafia *${rival.nome}* pra uma corrida!\n\n🏁 Pista: *${pista.emoji} ${pista.nome}*\n\n@${ridUid.split('@')[0]}, aceita?\n*.corrida aceitar* | *.corrida recusar*\n_(60s pra decidir)_`,mentions:[ridUid]},{quoted:msg})
+  }
+}
+
+const AUTO_INTERVALOS = {
+  fome_leve:     90*60*1000,
+  fome_critica:  20*60*1000,
+  solidao:       2*60*60*1000,
+  saudades:      3*60*60*1000,
+  sonho:         5*60*60*1000,
+  exploracao:    6*60*60*1000,
+  moodswing:     4*60*60*1000,
+  energetico:    2*60*60*1000,
+  reflexao:      8*60*60*1000,
+  provocacao:    3*60*60*1000,
+}
+
+function getHoraLocal(){ const h=new Date().getHours(); return h<6?'madrugada':h<12?'manhã':h<18?'tarde':'noite' }
+
+function calcNegligencia(pet){
+  const h=(Date.now()-(pet.ultimaInteracao||Date.now()))/3_600_000
+  if(h<1) return 0
+  if(h<4) return 1
+  if(h<12) return 2
+  if(h<24) return 3
+  return 4
+}
+
+const AUTO_COMPORTAMENTOS = [
+  {
+    id:'fome_leve', peso:3,
+    trigger:(p)=>p.stats.fome<40&&p.stats.fome>=20,
+    intervalo:(p)=>AUTO_INTERVALOS.fome_leve,
+    ctx:(p)=>`com o estômago roncando leve mas ainda aguentando`,
+    acao:(p)=>`fome leve — tentando chamar atenção sutilmente`,
+    extra:(p,reply)=>{},
+  },
+  {
+    id:'fome_desespero', peso:5,
+    trigger:(p)=>p.stats.fome<20,
+    intervalo:(p)=>AUTO_INTERVALOS.fome_critica,
+    ctx:(p)=>`com fome séria, estômago vazio e energia baixando`,
+    acao:(p)=>`fome crítica — chamando atenção desesperadamente`,
+    extra:async(p,reply)=>{ await reply(`_(use *.alimentar* antes que a vida comece a cair!)_`) },
+  },
+  {
+    id:'solidao_crescente', peso:4,
+    trigger:(p)=>calcNegligencia(p)>=2&&p.stats.felicidade<50,
+    intervalo:(p)=>AUTO_INTERVALOS.solidao,
+    ctx:(p,h)=>`sozinho há horas, vendo o tempo passar na ${h}`,
+    acao:(p)=>`solidão crescente — fase ${calcNegligencia(p)} de neglect`,
+    extra:(p,reply)=>{},
+  },
+  {
+    id:'abandono', peso:6,
+    trigger:(p)=>calcNegligencia(p)>=3,
+    intervalo:(p)=>AUTO_INTERVALOS.saudades,
+    ctx:(p)=>`sentindo que o dono esqueceu de vez, tristeza profunda`,
+    acao:(p)=>`abandono — negligência fase ${calcNegligencia(p)}`,
+    extra:async(p,reply)=>{ await reply(`_(${p.nome} tá ficando triste de verdade. Que tal um *.carinho*?)_`) },
+  },
+  {
+    id:'sonho_acordado', peso:2,
+    trigger:(p)=>p.stats.sono>80&&!p.dormindo,
+    intervalo:(p)=>AUTO_INTERVALOS.sonho,
+    ctx:(p,h)=>`sonolento na ${h}, misturando sonho com realidade`,
+    acao:(p)=>`sonolento — alucinações de cansaço`,
+    extra:(p,reply)=>{},
+  },
+  {
+    id:'exploracao', peso:2,
+    trigger:(p)=>p.stats.energia>70&&p.tracos.includes('aventureiro'),
+    intervalo:(p)=>AUTO_INTERVALOS.exploracao,
+    ctx:(p)=>`cheio de energia e com o instinto aventureiro batendo forte`,
+    acao:(p)=>`saiu explorar sozinho — relatório de volta`,
+    extra:async(p,reply)=>{
+      const achou=['uma pedrinha brilhante','um bichinho estranho','pegadas não identificadas','um mapa rasgado','nada — mas a jornada valeu'][~~(Math.random()*5)]
+      const ouro=Math.random()<.3?~~(Math.random()*60)+20:0
+      if(ouro){ p.economia.moedas+=ouro; await reply(`_(achou ${achou} e voltou com +${ouro}💰!)_`) }
+      else await reply(`_(achou ${achou}. Voltou feliz mesmo assim.)_`)
+    },
+  },
+  {
+    id:'moodswing', peso:3,
+    trigger:(p)=>p.stats.humor>70&&p.tracos.includes('brincalhão'),
+    intervalo:(p)=>AUTO_INTERVALOS.energetico,
+    ctx:(p,h)=>`na ${h}, animadíssimo sem motivo específico e com energia sobrando`,
+    acao:(p)=>`energia espontânea — humor nas alturas`,
+    extra:(p,reply)=>{},
+  },
+  {
+    id:'reflexao', peso:2,
+    trigger:(p)=>p.tracos.includes('carente')&&p.stats.felicidade>60,
+    intervalo:(p)=>AUTO_INTERVALOS.reflexao,
+    ctx:(p)=>`numa noite de reflexão, repassando memórias com o dono`,
+    acao:(p)=>`reflexão — carente fazendo auto análise afetiva`,
+    extra:(p,reply)=>{},
+  },
+  {
+    id:'provocacao_brava', peso:4,
+    trigger:(p)=>p.stats.humor<25&&calcNegligencia(p)>=1,
+    intervalo:(p)=>AUTO_INTERVALOS.provocacao,
+    ctx:(p)=>`de humor péssimo e com raiva acumulada do dono ausente`,
+    acao:(p)=>`provocação passivo-agressiva — humor baixo + neglect`,
+    extra:async(p,reply)=>{ await reply(`_(${p.nome} tá visivelmente irritado. Faça carinho ou prepare-se!)_`) },
+  },
+  {
+    id:'descoberta', peso:2,
+    trigger:(p)=>p.evolucao.estagio>=2,
+    intervalo:(p)=>AUTO_INTERVALOS.exploracao,
+    ctx:(p)=>`descobriu algo novo sobre seus próprios poderes`,
+    acao:(p)=>`descoberta de poder — pet mais evoluído se auto explorando`,
+    extra:async(p,reply)=>{
+      const ps=getPoderes(p)
+      if(ps.length>1){
+        const rand=ps[~~(Math.random()*ps.length)]
+        await reply(`_(percebeu que consegue usar *${rand.nome}* ${rand.emoji} de um jeito diferente...)_`)
+        p.stats.mana=clamp(p.stats.mana+10)
+      }
+    },
+  },
+  {
+    id:'comentario_hora', peso:2,
+    trigger:(p,h)=>h==='madrugada'&&!p.dormindo&&p.stats.sono<60,
+    intervalo:(p)=>3*60*60*1000,
+    ctx:(p)=>`acordado na madrugada enquanto devia estar dormindo`,
+    acao:(p)=>`madrugada — insone ou acordado por conta própria`,
+    extra:(p,reply)=>{},
+  },
+]
+
+function escolherComportamento(pet){
+  const hora=getHoraLocal()
+  const disponiveis=AUTO_COMPORTAMENTOS.filter(c=>{
+    if(!c.trigger(pet,hora)) return false
+    const ultimoTs=pet._autoHist?.[c.id]||0
+    return Date.now()-ultimoTs>=c.intervalo(pet)
+  })
+  if(!disponiveis.length) return null
+  const totalPeso=disponiveis.reduce((a,c)=>a+c.peso,0)
+  let roll=Math.random()*totalPeso
+  for(const c of disponiveis){ roll-=c.peso; if(roll<=0) return{c,hora} }
+  return{c:disponiveis[0],hora}
+}
+
+export const hooks=[
+  {id:'sp-nome',name:'SoulPet — nome',priority:60,
+   handle:async({texto,userId,reply})=>{
+     if(!texto||/^[.!/$]/.test(texto))return
+     const pet=getPet(userId);if(!pet||pet.status!=='vivo'||pet.dormindo)return
+     if(!texto.toLowerCase().startsWith(pet.nome.toLowerCase()))return
+     const msg2=texto.slice(pet.nome.length).trim();if(!msg2||msg2.length<2)return
+     const p=decay(pet);p.stats.felicidade=clamp(p.stats.felicidade+3);ganharXP(p,2)
+     const fala=await iaFala(p,`chamado pelo nome diretamente: "${msg2}"`,msg2)
+     mem(p,'chamada',`"${msg2.slice(0,40)}"`);setPet(userId,p)
+     await reply(`💬 *${p.nome}:* _${fala}_`);return true
+   }},
+
+  {id:'sp-decay',name:'SoulPet — decay',priority:72,
+   handle:async({userId,reply})=>{
+     const pet=getPet(userId);if(!pet||pet.status!=='vivo')return
+     if(pet._dt&&(Date.now()-pet._dt)<10*60*1000)return
+     const p=decay(pet);p._dt=Date.now();tryGlobEv();setPet(userId,p)
+     if(p.stats.fome<15&&!p._aF){p._aF=true;setPet(userId,p);await reply(`⚠️ *${p.nome} tá com fome crítica!*\n*.alimentar* agora!`)}else if(p.stats.fome>=30)p._aF=false
+     if(p.stats.vida<=20&&!p._aV){p._aV=true;setPet(userId,p);await reply(`🚨 *${p.nome} com vida crítica!*\n*.pet usar pocao_vida*`)}else if(p.stats.vida>30)p._aV=false
+   }},
+
+  {id:'sp-bat-ai',name:'SoulPet — batalha IA',priority:65,
+   handle:async({userId,reply,sock,from,msg})=>{
+     const bat=getBatUser(userId);if(!bat||bat.status!=='ativo')return
+     const isP1=bat.p1===userId,minhaVez=bat.vez===(isP1?1:2)
+     if(!minhaVez||Date.now()-bat.ultimoAtoTs<CFG.BAT_TURN_MS)return
+     const pet=getPet(userId);if(!pet)return
+     const me=isP1?1:2,myCDs=(isP1?bat.cd1:bat.cd2)||{},ps=getPoderes(pet)
+     await reply(`🤖 *IA decide por ${pet.nome}!*`)
+     const acao=await iaDecideBatalha(pet,ps,bat[`hp${me}`],bat[`mana${me}`],bat[`hp${me===1?2:1}`],myCDs)
+     await reply(`🤖 → *${acao}*`)
+     return cmdPet.execute({reply,userId,args:['turno',...acao.split(' ')],sock,msg,from,isOwner:false,isSubdono:false,usuario:'IA'})
+   }},
+
+  {id:'sp-auto',name:'SoulPet — autonomia rica',priority:78,
+   handle:async({userId,reply})=>{
+     const pet=getPet(userId);if(!pet||pet.status!=='vivo'||pet.dormindo)return
+     if(Math.random()>.25)return
+
+     const resultado=escolherComportamento(pet)
+     if(!resultado)return
+
+     const{c,hora}=resultado
+     const p=decay(pet)
+
+     if(!p._autoHist) p._autoHist={}
+     p._autoHist[c.id]=Date.now()
+
+     const fala=await iaFala(p,c.ctx(p,hora),c.acao(p))
+
+     mem(p,'autonomo',c.id)
+     setPet(userId,p)
+
+     await reply(`💭 *${p.nome}:*\n_${fala}_`)
+     await c.extra(p,reply)
+   }},
+]
+
+export default [
+  cmdPet, cmdPetList, cmdMenuPet, cmdMenuAlias,
+  cmdAlimentar, cmdBrincar, cmdTreinar, cmdDormir, cmdAcordar,
+  cmdCarinho, cmdBeijou, cmdPasseio, cmdBanho,
+  cmdStatus, cmdInv, cmdLoja, cmdRank, cmdPetRankAlias, cmdPerfil, cmdPoderes,
+  cmdPescar, cmdMasmorra, cmdCorrida,
+  cmdRenomear, cmdVerPet, cmdTrabalhar, cmdMissao, cmdMissaoResgatar,
+  cmdGiftar, cmdMeditar, cmdCriarCmdIA, cmdPetStats, cmdAvaliar,
+]
